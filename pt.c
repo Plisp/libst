@@ -1,10 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/mman.h>
 #include "pt.h"
-
-/** api **/
 
 PieceTable *pt_new_from_str(const char *str)
 {

@@ -1,2 +1,2 @@
-test:
-	$(CC) pt.c test.c -o test && ./test
+test: pt.c test.c
+	$(CC) $^ -o test
