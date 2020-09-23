@@ -1,11 +1,12 @@
 debug: clean
-	$(CC) pt.c demo.c -o demo -Wall -g
+	$(CC) pt_array.c demo.c -Wall -g -o array_demo
+	$(CC) pt_tree.c demo.c -Wall -g -o tree_demo
 
 
 release: clean
-	$(CC) pt.c demo.c -O3 -o demo -DNDEBUG
-	$(CC) pt.c demo.c -O3 -S -fverbose-asm -g -DNDEBUG
-	$(CC) pt.c -O3 -fPIC -shared -o libpt.so
+	$(CC) pt_array.c demo.c -O3 -DNDEBUG -o array_demo
+	#$(CC) pt_array.c demo.c -O3 -S -fverbose-asm -g -DNDEBUG
+	$(CC) pt_array.c demo.c -O3 -DNDEBUG -o tree_demo
 
 clean:
-	rm -f demo demo.s pt.s libpt.so
+	rm -f array_demo tree_demo demo.s pt_array.s pt_tree.s

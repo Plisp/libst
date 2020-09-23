@@ -1,18 +1,86 @@
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+
 #include "pt.h"
 
-#ifndef NDEBUG
 size_t pt_nodes_moved = 0;
-#endif
+
+struct text_info {
+	size_t bytes, lfs;
+};
+
+struct pnode {
+	struct text_info linfo; /* info of left subtree */
+	struct text_info info; /* info of this piece */
+	char *data;           /* pointer into corresponding block */
+	struct block *buf;   /* only sane way to maintain/resize lfs */
+	size_t lf;          /* index into corresponding linefeed buffer */
+};
+
+struct location {
+	struct pnode *piece;
+	size_t off;
+};
+
+#define PT_BLKSIZE (1<<20)
+enum blktype { HEAP, MMAP };
+
+struct block {
+	enum blktype type;
+	size_t size, capacity;
+	char *data;
+	size_t lf_size, lf_capacity;
+	size_t *lfs;
+	struct block *next;
+};
+
+struct piecetable {
+	size_t size, lfs;
+	struct block *blocks;             /* list of text blocks */
+	size_t tree_size, tree_capacity; /* no. of nodes in tree */
+	struct pnode *tree;             /* an inorder array of nodes */
+};
+
+struct undo {
+	union {
+		PieceTable clone;
+		struct {
+			struct pnode *old;
+			size_t old_len;
+			struct pnode *new;
+			size_t new_len;
+			size_t off;
+		} record;
+	};
+	bool is_clone;
+	bool is_undone;
+};
+
+/* basic utilities */
+
+size_t pt_size(PieceTable *pt) {
+	return pt->size;
+}
+
+size_t pt_lfs(PieceTable *pt) {
+	return pt->lfs;
+}
 
 /* constructors */
 
-void pt_print_lfs(struct text_buffer *b)
+void pt_print_lfs(struct block *b)
 {
 	for(size_t i = 0; i < b->lf_size; i++)
 		printf("%zd\n", b->lfs[i]);
 }
 
-static size_t buffer_append_lfs(struct text_buffer *b, size_t len)
+static size_t buffer_append_lfs(struct block *b, size_t len)
 {
 	char *data = b->data + b->size - len;
 	size_t orig = b->lf_size;
@@ -28,18 +96,18 @@ static size_t buffer_append_lfs(struct text_buffer *b, size_t len)
 	return b->lf_size - orig;
 }
 
-static struct text_buffer *buffer_append(struct text_buffer *b, char *data, size_t len)
+static struct block *buffer_append(struct block *b, char *data, size_t len)
 {
-	if (b->size + len <= b->capacity) { // should never hold for MMAP buffers
+	if (b->size + len <= b->capacity) { // should never hold for MMAP blocks
 		assert(b->type == HEAP);
 		memcpy(b->data + b->size, data, len);
 		b->size += len;
 		return NULL;
 	} else {
-		struct text_buffer *new = malloc(sizeof *new);
+		struct block *new = malloc(sizeof *new);
 		new->type = HEAP;
 		new->size = len;
-		new->capacity = max(PT_BUFSIZE, len);
+		new->capacity = max(PT_BLKSIZE, len);
 		new->data = malloc(new->capacity);
 		memcpy(new->data, data, len);
 		new->lf_size = new->lf_capacity = 0;
@@ -53,7 +121,7 @@ static size_t count_lfs(struct pnode *node, size_t off, size_t bytes)
 {
 	pt_dbg("searching for lfs: off %zd, bytes: %zd, %zd lfs in node\n",
 			off, bytes, node->info.lfs);
-	struct text_buffer *buf = node->buf;
+	struct block *buf = node->buf;
 	size_t lf = node->lf;
 	while(lf - node->lf < node->info.lfs) {
 		if(buf->lfs[lf++] >= off) {
@@ -72,7 +140,8 @@ static size_t count_lfs(struct pnode *node, size_t off, size_t bytes)
 	return 0;
 }
 
-struct location pt_get_piece(PieceTable *pt, size_t off)
+// TODO binary search
+struct location pt_search_piece(PieceTable *pt, size_t off)
 {
 	struct pnode *node = pt->tree;
 	for(size_t i = 0; i < pt->tree_size; i++, node++) {
@@ -86,11 +155,11 @@ struct location pt_get_piece(PieceTable *pt, size_t off)
 PieceTable *pt_new_from_data(const char *data, size_t len)
 {
 	PieceTable *pt = malloc(sizeof *pt);
-	pt->buffers = malloc(sizeof(struct text_buffer));
+	pt->blocks = malloc(sizeof(struct block));
 	pt->tree_size = pt->tree_capacity = 2;
 	pt->tree = malloc(2 * sizeof(struct pnode));
 
-	struct text_buffer *init = pt->buffers;
+	struct block *init = pt->blocks;
 	init->next = NULL;
 	init->type = HEAP;
 	init->size = init->capacity = len;
@@ -100,6 +169,8 @@ PieceTable *pt_new_from_data(const char *data, size_t len)
 	init->lfs = NULL;
 	size_t lfs = buffer_append_lfs(init, len);
 
+	pt->size = len;
+	pt->lfs = lfs;
 	pt->tree[0] = (struct pnode) {0};
 	pt->tree[1] = (struct pnode) {
 		.info = {
@@ -116,19 +187,20 @@ PieceTable *pt_new_from_data(const char *data, size_t len)
 PieceTable *pt_new_from_file(const char *path, size_t len, size_t off)
 {
 	PieceTable *pt = malloc(sizeof *pt);
-	pt->buffers = malloc(sizeof(struct text_buffer));
+	pt->blocks = malloc(sizeof(struct block));
 	pt->tree_size = pt->tree_capacity = 2;
 	pt->tree = malloc(2 * sizeof(struct pnode));
 
 	int fd = open(path, O_RDONLY);
 	if(!fd)
 		goto fail;
+	// mmap manpage asserts len > 0
 	len = len ? len : lseek(fd, off, SEEK_END);
 	void *data = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, off);
 	close(fd);
 	if(data == MAP_FAILED)
 		goto fail;
-	struct text_buffer *init = pt->buffers;
+	struct block *init = pt->blocks;
 	init->next = NULL;
 	init->type = MMAP;
 	init->size = init->capacity = len;
@@ -137,6 +209,8 @@ PieceTable *pt_new_from_file(const char *path, size_t len, size_t off)
 	init->lfs = NULL;
 	size_t lfs = buffer_append_lfs(init, len);
 
+	pt->size = len;
+	pt->lfs = lfs;
 	pt->tree[0] = (struct pnode) {0};
 	pt->tree[1] = (struct pnode) {
 		.info = {
@@ -151,12 +225,12 @@ PieceTable *pt_new_from_file(const char *path, size_t len, size_t off)
 
 fail:
 	free(pt->tree);
-	free(pt->buffers);
+	free(pt->blocks);
 	free(pt);
 	return NULL;
 }
 
-static void free_buffer(struct text_buffer *b)
+static void free_buffer(struct block *b)
 {
 	if(b->type == HEAP)
 		free(b->data);
@@ -168,7 +242,7 @@ static void free_buffer(struct text_buffer *b)
 
 void pt_free(PieceTable *pt)
 {
-	for(struct text_buffer *b = pt->buffers, *next; b; b = next) {
+	for(struct block *b = pt->blocks, *next; b; b = next) {
 		pt_dbg("freeing buffer of size %zd\n", b->size);
 		next = b->next;
 		free_buffer(b);
@@ -189,6 +263,7 @@ void pt_insert_piece(PieceTable *pt, struct pnode new, struct pnode *at)
 		at = pt->tree + index;
 	}
 	size_t count = pt->tree + pt->tree_size - at;
+	pt_nodes_moved += count;
 	memmove(at + 1, at, count * sizeof(struct pnode));
 	pt->tree_size++;
 	*at = new;
@@ -197,39 +272,45 @@ void pt_insert_piece(PieceTable *pt, struct pnode new, struct pnode *at)
 void pt_delete_piece(PieceTable *pt, struct pnode *at)
 {
 	size_t count = pt->tree + pt->tree_size - at - 1;
+	pt_nodes_moved += count;
 	memmove(at, at + 1, count * sizeof(struct pnode));
 	pt->tree_size--;
 }
 
-size_t piece_offset(struct text_buffer *buffers, struct pnode *node)
+size_t piece_offset(struct block *blocks, struct pnode *node)
 {
-	for(struct text_buffer *b = buffers; b; b = b->next) {
+	for(struct block *b = blocks; b; b = b->next) {
 		if(b->data <= node->data && node->data < b->data + b->size)
 			return node->data - b->data;
 	}
-	assert(0); // this is bad, real bad
+	pt_dbg("doh! piece buffer not found\n");
+	_Exit(1);
 }
 
 bool pt_insert(PieceTable *pt, size_t pos, char *data, size_t len, struct undo *undo)
 {
 	size_t lfs;
-	struct text_buffer *b = buffer_append(pt->buffers, data, len);
+	struct block *b = buffer_append(pt->blocks, data, len);
 	if(b) {
-		b->next = pt->buffers;
-		pt->buffers = b;
+		b->next = pt->blocks;
+		pt->blocks = b;
 		lfs = buffer_append_lfs(b, len);
 	} else
-		lfs = buffer_append_lfs(pt->buffers, len);
-	char *inserted_data = pt->buffers->data + pt->buffers->size - len;
-	size_t lf = pt->buffers->lf_size - lfs;
+		lfs = buffer_append_lfs(pt->blocks, len);
+	char *inserted_data = pt->blocks->data + pt->blocks->size - len;
+	size_t lf = pt->blocks->lf_size - lfs;
 	struct pnode new = {
 		.info = { .bytes = len, .lfs = lfs },
 		.data = inserted_data,
-		.buf = pt->buffers,
+		.buf = pt->blocks,
 		.lf = lf
 	};
 
 	struct location loc = pt_get_piece(pt, pos);
+	// TODO: next steps
+	// insert node if depth sufficient
+	// update linfo in upwards pass
+	// maybe rebalance - shuffle nodes to one side, recursive filling
 	struct pnode *old = loc.piece;
 	if(loc.off == old->info.bytes) {
 		pt_dbg("insertion at boundary\n");
@@ -250,7 +331,7 @@ bool pt_insert(PieceTable *pt, size_t pos, char *data, size_t len, struct undo *
 		}
 		pt_insert_piece(pt, new, old + 1);
 	} else {
-		size_t lfs_on_left = count_lfs(old, piece_offset(pt->buffers, old), loc.off);
+		size_t lfs_on_left = count_lfs(old, piece_offset(pt->blocks, old), loc.off);
 		struct pnode new_left = {
 			.info = { .bytes = loc.off, .lfs = lfs_on_left },
 			.data = old->data,
@@ -290,19 +371,16 @@ bool pt_insert(PieceTable *pt, size_t pos, char *data, size_t len, struct undo *
 			pt->tree_capacity = pt->tree_size * 2;
 			pt->tree = realloc(pt->tree, pt->tree_capacity * sizeof(struct pnode));
 		}
-		memmove(&pt->tree[index+2], &pt->tree[index],
-				(pt->tree_size - index) * sizeof(struct pnode));
+		size_t count = pt->tree_size - index;
+		pt_nodes_moved += count;
+		memmove(&pt->tree[index+2], &pt->tree[index], count * sizeof(struct pnode));
 		pt->tree[index] = new_left;
 		pt->tree[index+1] = new;
 		pt->tree[index+2] = new_right;
 		pt->tree_size += 2;
-		/*
-		pt_delete_piece(pt, old);
-		pt_insert_piece(pt, new_right, pt->tree + index);
-		pt_insert_piece(pt, new, pt->tree + index);
-		pt_insert_piece(pt, new_left, pt->tree + index);
-		*/
 	}
+	pt->size += len;
+	pt->lfs += lfs;
 	return true;
 }
 
@@ -320,7 +398,7 @@ bool pt_redo(PieceTable *pt, struct undo *undo)
 	return pt;
 }
 
-/* debug printing */
+/* printing */
 
 void pt_print_node(struct pnode *node)
 {
@@ -336,4 +414,18 @@ void pt_print_tree(PieceTable *pt)
 		pt_print_node(&pt->tree[i]);
 	}
 	puts("┗━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━┛");
+}
+
+void pt_print_struct_sizes()
+{
+	printf(
+		"sizeof(struct pnode): %zd, "
+		"sizeof(struct block): %zd, "
+		"sizeof(struct undo): %zd, "
+		"sizeof(PieceTable): %zd\n",
+		sizeof(struct pnode),
+		sizeof(struct block),
+		sizeof(struct undo),
+		sizeof(PieceTable)
+	);
 }

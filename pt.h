@@ -1,15 +1,7 @@
 #ifndef PT_H
 #define PT_H
 
-#include <assert.h>
 #include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/mman.h>
 
 #define max(a,b) ({ \
 	__typeof__ (a) _a = (a); \
@@ -25,61 +17,17 @@
 
 #ifndef NDEBUG
 	#define pt_dbg(...) fprintf(stderr, "\e[38;5;1mdebug: \e[0m" __VA_ARGS__)
-extern size_t pt_nodes_moved;
 #else
 	#define pt_dbg(...)
 #endif
-// TODO make structs static
-struct text_info {
-	size_t bytes, lfs;
-};
 
-// 56 bytes... what a pity
-struct pnode {
-	struct text_info left_info; /* store cumulative info of left child */
-	struct text_info info;     /* info of this piece */
-	char *data;               /* pointer into corresponding text_buffer */
-	struct text_buffer *buf; /* only sane way to maintain/resize lfs */
-	size_t lf;              /* index into corresponding linefeed buffer */
-};
+size_t pt_nodes_moved;
 
-struct location {
-	struct pnode *piece;
-	size_t off;
-};
-
-#define PT_BUFSIZE (1<<20)
-enum buftype { HEAP, MMAP };
-
-struct text_buffer {
-	enum buftype type;
-	size_t size, capacity;
-	char *data;
-	size_t lf_size, lf_capacity;
-	size_t *lfs;
-	struct text_buffer *next;
-};
-
-typedef struct {
-	struct text_buffer *buffers;      /* list of text buffers */
-	size_t tree_size, tree_capacity; /* no. of nodes in tree */
-	struct pnode *tree;             /* an inorder array of nodes */
-} PieceTable;
-
-struct undo {
-	union {
-		PieceTable clone;
-		struct {
-			struct pnode *old;
-			size_t old_len;
-			struct pnode *new;
-			size_t new_len;
-			size_t off;
-		} record;
-	};
-	bool is_clone;
-	bool is_undone;
-};
+struct pnode;
+struct location;
+struct block;
+struct undo;
+typedef struct piecetable PieceTable;
 
 /* internal */
 
@@ -93,9 +41,11 @@ PieceTable *pt_new_from_data(const char *data, size_t len);
 PieceTable *pt_new_from_file(const char *path, size_t len, size_t off);
 void pt_free(PieceTable *pt);
 
+size_t pt_size(PieceTable *pt);
+size_t pt_lfs(PieceTable *pt);
+
 bool pt_insert(PieceTable *pt, size_t pos, char *data, size_t len, struct undo *undo);
-bool pt_insert_file(PieceTable *pt, size_t pos, const char *path, size_t len, size_t off,
-		struct undo *undo);
+bool pt_insert_file(PieceTable *pt, size_t pos, const char *path, size_t len, size_t off, struct undo *undo);
 bool pt_erase(PieceTable *pt, size_t pos, size_t len, struct undo *undo);
 
 bool pt_undo(PieceTable *pt, struct undo *undo);
@@ -103,6 +53,7 @@ bool pt_redo(PieceTable *pt, struct undo *redo);
 
 void pt_print_node(struct pnode *node);
 void pt_print_tree(PieceTable *pt);
+void pt_print_struct_sizes();
 
 /* Iterator API */
 

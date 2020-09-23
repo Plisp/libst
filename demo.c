@@ -1,9 +1,14 @@
-#include <time.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <time.h>
 
 #include "pt.h"
 
-#define ITERS 2
+#ifndef NDEBUG
+	#define ITERS 2
+#else
+	#define ITERS 20000
+#endif
 
 long sub_timespec(struct timespec before, struct timespec after)
 {
@@ -17,19 +22,10 @@ int main(int argc, char *argv[])
 		printf("\e[38;5;1mplease provide a single filename as argument\n");
 		return 1;
 	}
-	printf(
-		"sizeof(struct pnode): %zd, "
-		"sizeof(struct text_buffer): %zd, "
-		"sizeof(struct undo): %zd, "
-		"sizeof(PieceTable): %zd\n",
-		sizeof(struct pnode),
-		sizeof(struct text_buffer),
-		sizeof(struct undo),
-		sizeof(PieceTable)
-	);
 
 	PieceTable *pt;
 #ifndef NDEBUG
+	pt_print_struct_sizes();
 	char data[] = "lorem\nipsum";
 
 	pt = pt_new_from_data(data, 11);
@@ -42,24 +38,21 @@ int main(int argc, char *argv[])
 #endif
 
 	struct timespec before, after;
-	clock_gettime(CLOCK_MONOTONIC, &before);
+	clock_gettime(CLOCK_REALTIME_COARSE, &before);
 	pt = pt_new_from_file(argv[1], 0, 0);
-	clock_gettime(CLOCK_MONOTONIC, &after);
+	clock_gettime(CLOCK_REALTIME_COARSE, &after);
 	printf("loaded file %s in %ld ms\n", argv[1], sub_timespec(before, after));
 	pt_print_tree(pt);
 
-	clock_gettime(CLOCK_MONOTONIC, &before);
-	size_t size = pt->tree[1].info.bytes;
-	for(int i = 0; i < ITERS; i++) {
-		pt_insert(pt, size/2, "t\na\n", 4, NULL);
-		size += 4;
-	}
-	clock_gettime(CLOCK_MONOTONIC, &after);
+	clock_gettime(CLOCK_REALTIME_COARSE, &before);
+	for(int i = 0; i < ITERS; i++)
+		pt_insert(pt, pt_size(pt)/2, "t\ns\n", 4, NULL);
+	clock_gettime(CLOCK_REALTIME_COARSE, &after);
 	printf("inserted %d times in %ld ms\n", ITERS, sub_timespec(before, after));
 #ifndef NDEBUG
 	pt_print_tree(pt);
-	printf("moved %zd nodes\n", pt_nodes_moved);
 #endif
+	printf("moved %zd nodes\n", pt_nodes_moved);
 	pt_free(pt);
 	return 0;
 }
