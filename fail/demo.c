@@ -7,7 +7,7 @@
 #ifndef NDEBUG
 	#define ITERS 2
 #else
-	#define ITERS 20000
+	#define ITERS 100000
 #endif
 
 long sub_timespec(struct timespec before, struct timespec after)
@@ -18,6 +18,8 @@ long sub_timespec(struct timespec before, struct timespec after)
 
 int main(int argc, char *argv[])
 {
+	pt_print_struct_sizes();
+#if 0
 	if (argc < 2) {
 		printf("\e[38;5;1mplease provide a single filename as argument\n");
 		return 1;
@@ -45,14 +47,19 @@ int main(int argc, char *argv[])
 	pt_print_tree(pt);
 
 	clock_gettime(CLOCK_REALTIME_COARSE, &before);
+	pt_insert(pt, pt_size(pt)-1, "t\ns\n", 4, NULL);
+	pt_insert(pt, pt_size(pt)-2, "t\ns\n", 4, NULL);
+	/*
 	for(int i = 0; i < ITERS; i++)
-		pt_insert(pt, pt_size(pt)/2, "t\ns\n", 4, NULL);
+		pt_insert(pt, pt_size(pt)-1, "t\ns\n", 4, NULL);
+		*/
 	clock_gettime(CLOCK_REALTIME_COARSE, &after);
 	printf("inserted %d times in %ld ms\n", ITERS, sub_timespec(before, after));
 #ifndef NDEBUG
 	pt_print_tree(pt);
 #endif
-	printf("moved %zd nodes\n", pt_nodes_moved);
+	printf("moved %ld nodes\n", pt_nodes_moved);
 	pt_free(pt);
 	return 0;
+#endif
 }

@@ -1,0 +1,70 @@
+\documentclass{patmorin}
+
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{wrapfig}
+\usepackage{minted}
+
+\title{Practical piece tables}
+\author{Thomas Qu}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+	for later...
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Motivation}
+
+What are the requirements on a text editor buffer?
+Bram Moolenaar (author of the Vim editor) proposes the following criteria:
+
+\begin{itemize}
+\item Reading and writing files should be fast.
+\item No restrictions on line length, file length or character set.
+\item Making changes in the text should be quick.
+\item The code to handle the text shouldn't be too big.
+\item Allow for undoing changes.
+\item When the system crashes, recovering unsaved changes must be possible.
+\end{itemize}
+
+We will briefly cover each point.
+
+\subsection{\emph{Reading and writing files should be fast}}
+
+It is desirable to load files quickly. Data structures which manipulate the whole file
+in-memory (such as most rope implementations) in buffers of fixed size do not scale well
+in this respect. Further, it's possible files may not even fit in memory.
+
+Another option is to implement a paging system, as seen in Vim. However this adds considerable complexity as well as consequences for performance.
+
+The piece table solves this problem by utilizing the operating system's virtual memory paging facilities.
+
+\subsection{\emph{No restrictions on line length, file length or character set}}
+
+In the author's experience, Vim itself struggles on long script dumps.
+
+\section{some notes}
+
+\begin{itemize}
+	\item In general, splay trees are unsuitable due to the $O(n)$ worst case read performance following sequential access of the whole document (e.g. searching).
+	\item They are also difficult to use concurrently, as reads may modify the tree.
+	\item Using a sequence of 'patches' (as used in Atom) tracking both inserted text and deletions from the original provides questionable (at maximum halving the number of nodes) benefits for a considerable increase in complexity.
+	\item [1]'s comments on the 'difference file' method is mostly applicable to Atom, which manipulates inserted data as a plain array. However the argument that edit tracking may entail additional memory overhead is annulled by the need to support undo.
+	\item Indexing in codepoints is often misguided, as usually one desires to operate sequentially on grapheme clusters (e.g. deleting a character, cursor movement) or bytes (e.g. searching). Further, the desired behaviour is unclear in the case of files containing invalid multibyte sequences, which may often occur when dealing with binary files or data corruption. Overall the additional complexity of tracking codepoints does not seem to be generally worthwhile in the context of a text editor.
+
+\end{itemize}
+
+\section{Bibliography}
+
+https://www.finseth.com/craft
+https://www.cs.unm.edu/~crowley/papers/sds.pdf
+https://blog.atom.io/2017/10/12/atoms-new-buffer-implementation.html
+https://code.visualstudio.com/blogs/2018/03/23/text-buffer-reimplementation
+https://www.free-soft.org/FSM/english/issue01/vim.html
+
+\end{document}

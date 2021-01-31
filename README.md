@@ -1,5 +1,7 @@
 # libpt
+A collection of piece tables.
 
 - [x] array based
-- [ ] implicit tree
+- [x] implicit scapegoat tree
+- [ ] splay tree
 - [ ] linked-list iterator optimized
