@@ -1,11 +1,28 @@
 #include <iostream>
-#include <immer/flex_vector.hpp>
+#include <immer/vector.hpp>
 
 #include "pt.h"
 
+using buf = immer::vector<char>;
+constexpr int B = 1 << 5;
 
-using line = immer::flex_vector<char>;
+struct ptable {
 
+	buf<buf> data;
+}
+
+enum NODETYPE { INNER, LEAF };
+
+struct pnode {
+	NODETYPE type;
+}
+
+struct inner {
+	nodetype type = inner;
+	struct pnode children[B];
+}
+
+// note, flex vector takes 400ms just for 100000 insertions
 int main()
 {
 	line content(5900000, 'x');
