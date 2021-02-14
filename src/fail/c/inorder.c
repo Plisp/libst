@@ -1,6 +1,7 @@
 //
-// inorder layout (broken - it is actually necessary to allocate a new level
-// in the tree, and this is far too expensive)
+// inorder layout (broken, after attempted iterative packing during rebalancing)
+// - we cannot allocate a new level without rebuilding the entire tree
+// - packing is unnecessarily complex, as we must special-case the inserted node
 //
 
 #include <assert.h>

@@ -19,7 +19,7 @@ long pt_nodes_moved = 0, rebalances;
 #ifdef NDEBUG
 	#define NODENULL(p) ((p)->bytes == 0)
 #else // n.b. multiple evaluation
-	#define NODENULL(p) ((p)->bytes == 0 && (p)->left.bytes == 0)
+	#define NODENULL(p) ((p)->bytes == 0 && (p)->lbytes == 0)
 #endif
 
 #define ALPHA 0.56
@@ -32,14 +32,9 @@ long pt_nodes_moved = 0, rebalances;
 	#define FFS(i) assert(0) // TODO
 #endif
 
-struct text_info {
-	long bytes, lfs;
-};
-
 struct pnode {
-	long bytes;             /* length */
-	struct text_info left; /* stats on left subtree */
-	char *data;           /* pointer into corresponding block */
+	long bytes, lbytes; /* length of text and left subtree text */
+	char *data;        /* pointer into corresponding block */
 };
 
 #define PT_BLKSIZE (1<<20) // must be big as we linear search through block list
@@ -230,7 +225,7 @@ struct pnode *pt_search(PieceTable *pt, long pos, long *offset)
 	long i = 0;
 	while(i < n) {
 		struct pnode *node = &pt->tree[i];
-		long sum = node->left.bytes + node->bytes;
+		long sum = node->lbytes + node->bytes;
 		// sum == 0 for null nodes, so this works for all pos > 0
 		i = (pos <= sum) ? 2*i+1 : 2*i+2;
 		pos = (pos <= sum) ? pos : pos - sum;
@@ -248,8 +243,7 @@ void update_metadata(struct pnode *tree, long index, long bytes, long lfs)
 	if(parent < 0)
 		return;
 	if(odd) {
-		tree[parent].left.bytes += bytes;
-		tree[parent].left.lfs += lfs;
+		tree[parent].lbytes += bytes;
 	}
 	update_metadata(tree, parent, bytes, lfs);
 }
@@ -289,7 +283,7 @@ long rebuild_recurse(struct pnode *root, long index, struct pnode *nodes, long n
 		long mid = n/2;
 		long lbytes = rebuild_recurse(root, 2*index + 1, nodes, mid);
 		root[index] = nodes[mid];
-		root[index].left.bytes = lbytes;
+		root[index].lbytes = lbytes;
 		long rbytes = rebuild_recurse(root, 2*index + 2, nodes + mid + 1, n - mid - 1);
 		return lbytes + root[index].bytes + rbytes;
 	} else
@@ -303,7 +297,7 @@ long pack_array(PieceTable *pt, long index, struct pnode *dest, long dest_index)
 	dest_index = pack_array(pt, 2*index + 1, dest, dest_index);
 	dest[dest_index++] = pt->tree[index];
 	pt->tree[index].bytes = 0;
-	pt->tree[index].left.bytes = 0;
+	pt->tree[index].lbytes = 0;
 	return pack_array(pt, 2*index + 2, dest, dest_index);
 }
 
@@ -354,10 +348,10 @@ void insert0(PieceTable *pt, struct pnode *new)
 			*node = *new;
 			break;
 		}
+		node->lbytes += new->bytes;
+	    //long lf_delta = 0; // TODO
 		i = 2*i + 1;
 	}
-	long lf_delta = 0; // TODO
-	update_metadata(pt->tree, i, node->bytes, lf_delta);
 }
 
 void insert_node_after(PieceTable *pt, struct pnode *new, long index)
@@ -391,10 +385,10 @@ void insert_node_after(PieceTable *pt, struct pnode *new, long index)
 			*node = *new;
 			break;
 		}
+		node->lbytes += new->bytes;
+		//long lf_delta = 0; // TODO
 		index = index*2 + 1;
 	}
-	long lf_delta = 0; // TODO
-	update_metadata(pt->tree, index, new->bytes, lf_delta);
 }
 
 bool pt_insert(PieceTable *pt, long pos, char *data, long len, struct undo *undo)
@@ -421,7 +415,7 @@ bool pt_insert(PieceTable *pt, long pos, char *data, long len, struct undo *undo
 			struct pnode old_left = { 
 				.bytes = off, 
 				.data = node->data,
-				.left.bytes = node->left.bytes,
+				.lbytes = node->lbytes,
 			};
 			struct pnode old_right = {
 				.bytes = node->bytes - off,
@@ -478,9 +472,9 @@ bool pt_redo(PieceTable *pt, struct undo *undo)
 
 void pt_print_node(struct pnode *node)
 {
-	printf("┃ %3ld,%3ld bytes ┃ %3ld,%3ld lfs ┃ data: %5.*s...┃",
-			node->left.bytes, node->bytes,
-			node->left.lfs, count_lfs(node, 0, node->bytes),
+	printf("┃ %3ld,%3ld bytes ┃ %3ld lfs ┃ data: %5.*s...┃",
+			node->lbytes, node->bytes,
+			count_lfs(node, 0, node->bytes),
 			(int)MIN(5, node->bytes), node->data);
 }
 
