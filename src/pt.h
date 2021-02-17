@@ -1,5 +1,4 @@
-#ifndef PT_H
-#define PT_H
+#pragma once
 
 #include <stdbool.h>
 
@@ -32,6 +31,7 @@ bool pt_erase(PieceTable *pt, long pos, long len);
 
 void pt_print_tree(PieceTable *pt);
 void pt_print_struct_sizes(void);
+bool pt_to_dot(PieceTable *pt, const char *path);
 
 /* PieceIterator API */
 
@@ -50,5 +50,3 @@ bool pt_iterator_get_bytes(PieceIterator *it, char *buf, long count);
 
 bool pt_iterator_insert(PieceIterator *it, char *data);
 bool pt_iterator_erase(PieceIterator *it, long count);
-
-#endif
