@@ -29,24 +29,28 @@ bool pt_insert(PieceTable *pt, long pos, char *data, long len);
 bool pt_insert_file(PieceTable *pt, long pos, const char *path, long len, long off);
 bool pt_erase(PieceTable *pt, long pos, long len);
 
-void pt_print_tree(PieceTable *pt);
+void pt_pprint(PieceTable *pt);
 void pt_print_struct_sizes(void);
-bool pt_to_dot(PieceTable *pt, const char *path);
+bool pt_to_dot(PieceTable *pt);
 
 /* PieceIterator API */
 
-PieceIterator *pt_iterator_get(PieceTable *pt, long pos);
+PieceIterator *pt_iter_get(PieceTable *pt, long pos);
+PieceIterator *pt_iter_clone(PieceIterator *);
 
-bool pt_iterator_next_byte(PieceIterator *it, long count);
-bool pt_iterator_prev_byte(PieceIterator *it, long count);
+long pt_iter_pos(PieceIterator *);
+long pt_iter_visual_col(PieceIterator *);
 
-bool pt_iterator_next_line(PieceIterator *it, long count);
-bool pt_iterator_next_line(PieceIterator *it, long count);
+bool pt_iter_next_byte(PieceIterator *it, long count);
+bool pt_iter_prev_byte(PieceIterator *it, long count);
 
-bool pt_iterator_next_cp(PieceIterator *it, long count);
-bool pt_iterator_prev_cp(PieceIterator *it, long count);
+bool pt_iter_next_line(PieceIterator *it, long count);
+bool pt_iter_next_line(PieceIterator *it, long count);
 
-bool pt_iterator_get_bytes(PieceIterator *it, char *buf, long count);
+bool pt_iter_next_cp(PieceIterator *it, long count);
+bool pt_iter_prev_cp(PieceIterator *it, long count);
 
-bool pt_iterator_insert(PieceIterator *it, char *data);
-bool pt_iterator_erase(PieceIterator *it, long count);
+bool pt_iter_get_bytes(PieceIterator *it, char *buf, long count);
+
+bool pt_iter_insert(PieceIterator *it, char *data);
+bool pt_iter_erase(PieceIterator *it, long count);

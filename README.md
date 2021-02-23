@@ -5,4 +5,5 @@ A collection of piece tables.
 - [x] scapegoat array
 - [ ] persistent btree
 - [ ] splay tree
-- [ ] linked-list iterator optimized
+- [ ] linked-list
+- [ ] finger tree

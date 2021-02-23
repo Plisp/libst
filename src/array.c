@@ -13,14 +13,6 @@
 #include <sys/mman.h>
 
 #include "pt.h"
-#include "dot.h"
-
-#define FSTR(dest, str, ...) \
-do { \
-	int len = snprintf(NULL, 0, str, __VA_ARGS__); \
-	dest = realloc(dest, len+1); \
-	sprintf(dest, str, __VA_ARGS__); \
-} while (0)              \
 
 long pt_nodes_moved = 0;
 
@@ -68,7 +60,7 @@ void pt_print_node(struct piece *node)
 			(int)MIN(5, node->bytes), node->data);
 }
 
-void pt_print_tree(PieceTable *pt)
+void pt_pprint(PieceTable *pt)
 {
 	printf("PieceTable with %ld/%ld nodes\n", pt->size, pt->capacity);
 	puts("┏━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓");
@@ -80,6 +72,7 @@ void pt_print_tree(PieceTable *pt)
 void pt_print_struct_sizes(void)
 {
 	printf(
+		"Implementation: \e[38;5;1marray\e[0m\n"
 		"sizeof(struct piece): %ld\n"
 		"sizeof(PieceTable): %ld\n",
 		sizeof(struct piece),
@@ -240,10 +233,19 @@ bool pt_insert(PieceTable *pt, long pos, char *data, long len)
 	return true;
 }
 
+#include "dot.h"
+
+#define FSTR(dest, str, ...) \
+do { \
+	int len = snprintf(NULL, 0, str, __VA_ARGS__); \
+	dest = realloc(dest, len+1); \
+	sprintf(dest, str, __VA_ARGS__); \
+} while (0)              \
+
 void pt_array_to_dot(PieceTable *pt, FILE *file)
 {
-	graph_link(file, pt, pt->vec);
-	graph_table_begin(file, pt->vec);
+	graph_link(file, pt, "vec", pt->vec, "body");
+	graph_table_begin(file, pt->vec, "aquamarine3");
 	for(long i = 0; i < pt->size; i++) {
 		char *tmp = NULL;
 		char *port = NULL;
@@ -254,30 +256,32 @@ void pt_array_to_dot(PieceTable *pt, FILE *file)
 	graph_table_end(file);
 	// output links
 	for(long i = 1; i < pt->size; i++)
-		fprintf(file, "\n  x%ld:%ld -> %.*s [style=dashed];\n", 
+		fprintf(file, "\n  x%ld:%ld -> %.*s [style=dashed];\n",
 				(long)pt->vec, i,
 				MIN((int)pt->vec[i].bytes, 15), pt->vec[i].data);
 }
 
-bool pt_to_dot(PieceTable *pt, const char *path)
+bool pt_to_dot(PieceTable *pt)
 {
-	FILE *file = fopen(path, "w");
-	if(!file) goto fail;
-	graph_begin(file);
-	graph_table_begin(file, pt);
+	FILE *file = fopen("./array.dot", "w");
 	char *tmp = NULL; // realloc
+	if(!file)
+		goto fail;
+	graph_begin(file);
+	graph_table_begin(file, pt, NULL);
 	FSTR(tmp, "size: %ld", pt->size);
 	graph_table_entry(file, tmp, NULL);
 	FSTR(tmp, "capacity: %ld", pt->capacity);
 	graph_table_entry(file, tmp, NULL);
-	graph_table_entry(file, "vec", "array");
+	graph_table_entry(file, "vec", "vec");
 	graph_table_end(file);
 	pt_array_to_dot(pt, file);
 	graph_end(file);
-	if(!fclose(file)) goto fail;
+	if(fclose(file) < 0)
+		goto fail;
 	return true;
 
 fail:
-	perror(strerror(errno));
+	perror("pt_to_dot");
 	return false;
 }

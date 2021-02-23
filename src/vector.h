@@ -10,8 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <time.h>
-
 #define SHIFT_BITS 2
 #define M (1 << SHIFT_BITS)
 
@@ -338,22 +336,4 @@ fail:
 	perror("pt_to_dot");
 	free(tmp);
 	return false;
-}
-
-int main(void)
-{
-	Vector *v = vector_new();
-	printf("leaves: %zd, inner: %zd\n",
-			sizeof(struct VecLeaf), sizeof(struct VecInner));
-	struct timespec before, after;
-	clock_gettime(CLOCK_REALTIME, &before);
-	for(int i = 0; i < 100000; i++) {
-		vector_append(v, "hello", 5);
-	}
-	clock_gettime(CLOCK_REALTIME, &after);
-	printf("took: %ld ms\n", (after.tv_nsec - before.tv_nsec)/1000000 +
-			(after.tv_sec - before.tv_sec)*1000);
-	vector_to_dot(v, "final.dot");
-	vector_free(v);
-	return 0;
 }

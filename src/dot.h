@@ -1,3 +1,4 @@
+#pragma once
 #include <stdio.h>
 
 void graph_begin(FILE *file)
@@ -9,37 +10,35 @@ void graph_begin(FILE *file)
 	);
 }
 
-void graph_link(FILE *file, void *a, void *b)
+void graph_link(FILE *file, const void *a, const char *port_a,
+				const void *b, const char *port_b)
 {
-	fprintf(file, "  x%ld -> x%ld\n", (long)a, (long)b);
+	fprintf(file, "  x%ld:%s -> x%ld:%s\n", (long)a, port_a, (long)b, port_b);
 }
 
-void graph_link_str(FILE *file, void *a, const char *s, int len)
+void graph_link_str(FILE *file, const void *a, const char *s, int len)
 {
 	fprintf(file, "  x%ld -> %.*s\n", (long)a, len, s);
 }
 
-void graph_table_begin(FILE *file, void *o)
+void graph_table_begin(FILE *file, const void *o, const char *color)
 {
+	fprintf(file, "\n  x%ld [", (long)o);
+	if(color)
+		fprintf(file, "color=%s ", color);
 	fprintf(file,
-		"\n  x%ld [label=<<table border=\"0\" cellborder=\"1\" "
+		"label=<<table border=\"0\" cellborder=\"1\" "
 		"cellspacing=\"0\" cellpadding=\"6\" align=\"center\" port=\"body\">\n"
-		"  <tr>\n", (long)o
+		"  <tr>\n"
 	);
 }
 
 void graph_table_entry(FILE *file, const char *s, const char *port)
 {
+	fprintf(file, "    <td height=\"36\" width=\"25\" ");
 	if(port)
-		fprintf(file,
-			"    <td height=\"36\" width=\"25\" port=\"%s\">%s</td>\n",
-			                                           port, s
-		);
-	else
-		fprintf(file,
-			"    <td height=\"36\" width=\"25\">%s</td>\n",
-			                                     s
-		);
+		fprintf(file, "port= \"%s\"", port);
+	fprintf(file, ">%s</td>\n", s);
 }
 
 void graph_table_end(FILE *file) {
