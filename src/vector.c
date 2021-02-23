@@ -9,15 +9,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include <time.h>
 
-#define SHIFT_BITS 2
+#define SHIFT_BITS 6
 #define M (1 << SHIFT_BITS)
 
 struct VecInner {
 	atomic_int refc;
-	struct VecInner *children[M]; // TODO: maybe use a flexible array here?
+	// no FAM: we'd have to keep track of child count and do extra allocation
+	// to save only O(height) (in other words: O(~1)) space in the right fringe
+	struct VecInner *children[M];
 };
 
 struct VecLeaf {
@@ -106,27 +107,33 @@ static void vecinner_free(struct VecInner *node, int shift)
 //
 // TODO determine if acquire above is even necessary if we're just cloning
 // children like this
-static struct VecInner *ensure_inner_editable(struct VecInner *node)
+static inline void ensure_inner_editable(struct VecInner **nodeptr, int shift)
 {
+	struct VecInner *node = *nodeptr;
 	int expect_one = 1;
 	if (atomic_compare_exchange_strong_explicit(&node->refc, &expect_one, 0,
 		memory_order_acquire, memory_order_relaxed)) {
 		// X: we just acquired. It's not necessary to synchronize here
 		incref(&node->refc);
-		return node;
-	} else // refc >= 2 or = 0 at point X above, no mutation is possible
-		return vecinner_clone(node);
+	} else { // refc >= 2 or = 0 at point X above, no mutation is possible
+		struct VecInner *copy = vecinner_clone(node);
+		vecinner_free(node, shift);
+		*nodeptr = copy;
+	}
 }
 
-static struct VecLeaf *ensure_leaf_editable(struct VecLeaf *node)
+static inline void ensure_leaf_editable(struct VecLeaf **nodeptr)
 {
+	struct VecLeaf *node = *nodeptr;
 	int expect_one = 1;
 	if (atomic_compare_exchange_strong_explicit(&node->refc, &expect_one, 0,
 		memory_order_acquire, memory_order_relaxed)) {
 		incref(&node->refc);
-		return node;
-	} else
-		return vecleaf_clone(node);
+	} else {
+		struct VecLeaf *copy = vecleaf_clone(node);
+		vecleaf_free(node);
+		*nodeptr = copy;
+	}
 }
 
 static inline long tail_index(Vector *v) {
@@ -160,9 +167,11 @@ Vector *vector_clone(Vector *v)
 	clone->shift = v->shift;
 	clone->size = v->size;
 	clone->tail = v->tail;
-	incref(&v->tail->refc);
+	if(v->tail)
+		incref(&v->tail->refc);
 	clone->root = v->root;
-	incref(&v->root->refc);
+	if(v->root)
+		incref(&v->root->refc);
 	return clone;
 }
 
@@ -170,7 +179,8 @@ void vector_free(Vector *v)
 {
 	if(v->root)
 		vecinner_free(v->root, v->shift);
-	vecleaf_free(v->tail);
+	if(v->tail)
+		vecleaf_free(v->tail);
 	free(v);
 }
 
@@ -196,7 +206,7 @@ static void insert_leaf(Vector *v, struct VecLeaf *leaf)
 		v->root = newroot;
 		v->shift += SHIFT_BITS;
 	} else {
-		v->root = ensure_inner_editable(v->root);
+		ensure_inner_editable(&v->root, v->shift);
 		struct VecInner *node = v->root;
 		long offset = v->size - 1;
 		for(int level = v->shift; level > SHIFT_BITS; level -= SHIFT_BITS) {
@@ -206,7 +216,7 @@ static void insert_leaf(Vector *v, struct VecLeaf *leaf)
 				node->children[i] = new_path(level - SHIFT_BITS, leaf);
 				return;
 			}
-			child = ensure_inner_editable(child);
+			ensure_inner_editable(&child, level);
 			node->children[i] = child;
 			node = child;
 		}
@@ -218,20 +228,21 @@ void vector_append(Vector *v, const char *s, long len)
 {
 	// fast path for small inserts fitting in the tail
 	if(tail_size(v) + len <= M) {
-		v->tail = ensure_leaf_editable(v->tail);
+		ensure_leaf_editable(&v->tail);
 		memcpy(v->tail->text + tail_size(v), s, len);
 		v->size += len;
 	} else {
-		v->tail = ensure_leaf_editable(v->tail);
+		ensure_leaf_editable(&v->tail);
 		int prefix = M - tail_size(v);
 		memcpy(v->tail->text + tail_size(v), s, prefix);
 		v->size += prefix;
 		s += prefix;
 		len -= prefix;
-		if(v->size == M)
+		if(v->size == M) {
 			v->root = (struct VecInner *)v->tail;
-		else
+		} else {
 			insert_leaf(v, v->tail);
+		}
 		assert(len > 0);
 		int chunks = (len - 1) / M;
 		for(int i = 0; i < chunks; i++) {
@@ -245,10 +256,10 @@ void vector_append(Vector *v, const char *s, long len)
 		}
 		assert(len <= M);
 		struct VecLeaf *tail = malloc(sizeof *tail);
+		tail->refc = 1;
 #ifndef NDEBUG
 		memset(tail->text + len, 0, M-len);
 #endif
-		tail->refc = 1;
 		memcpy(tail->text, s, len);
 		v->tail = tail;
 		v->size += len;
@@ -340,20 +351,28 @@ fail:
 	return false;
 }
 
+#if true
 int main(void)
 {
 	Vector *v = vector_new();
+	vector_append(v, "thing", 5);
+	Vector *old = vector_clone(v);
 	printf("leaves: %zd, inner: %zd\n",
 			sizeof(struct VecLeaf), sizeof(struct VecInner));
 	struct timespec before, after;
 	clock_gettime(CLOCK_REALTIME, &before);
 	for(int i = 0; i < 100000; i++) {
-		vector_append(v, "hello", 5);
+		vector_append(v, "thang", 5);
 	}
 	clock_gettime(CLOCK_REALTIME, &after);
-	printf("took: %ld ms\n", (after.tv_nsec - before.tv_nsec)/1000000 +
-			(after.tv_sec - before.tv_sec)*1000);
+	printf("took: %f ms, final size: %ld\n",
+			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
+			(after.tv_sec - before.tv_sec) * 1000,
+			v->size);
+	vector_to_dot(old, "debug.dot");
+	vector_free(old);
 	vector_to_dot(v, "final.dot");
 	vector_free(v);
 	return 0;
 }
+#endif

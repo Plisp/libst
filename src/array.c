@@ -263,7 +263,7 @@ void pt_array_to_dot(PieceTable *pt, FILE *file)
 
 bool pt_to_dot(PieceTable *pt)
 {
-	FILE *file = fopen("./array.dot", "w");
+	FILE *file = fopen("array.dot", "w");
 	char *tmp = NULL; // realloc
 	if(!file)
 		goto fail;

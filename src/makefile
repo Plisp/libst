@@ -17,16 +17,16 @@ dot:
 	#dot -Tpng btree.dot -o btree.png
 
 clean:
-	rm -fv array btree *.dot *.png
+	rm -fv array btree vector *.dot *.png
 
-v:
-	$(CC) -O3 vector.c -Wno-shift-op-parentheses
-	./a.out
-
+vec:
+	$(CC) -O3 vector.c -Wno-shift-op-parentheses -o vector
+	#valgrind --leak-check=full ./vector
+	./vector
 
 d:
-	dot -o vector.png -Tpng vector.dot
-	sxiv vector.png
+	dot -o debug.png -Tpng debug.dot
+	sxiv debug.png
 
 f:
 	dot -o final.png -Tpng final.dot
