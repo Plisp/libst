@@ -1,6 +1,6 @@
 //
-// my own persistent vector implementation, after realising I wouldn't have to
-// figure out rrb concatenation after all
+// persistent vector implementation, after realising I wouldn't have to figure
+// out rrb concatenation after all. Mostly translated from L'Orange's impl
 //
 
 #include <assert.h>
@@ -11,7 +11,7 @@
 #include <string.h>
 //#include <time.h>
 
-#define SHIFT_BITS 6
+#define SHIFT_BITS 5
 #define M (1 << SHIFT_BITS)
 
 struct VecInner {
@@ -35,7 +35,8 @@ typedef struct {
 
 static inline void incref(atomic_int *refc)
 {
-	// can be relaxed as we hold a reference, which is all that matters
+	// can be relaxed as we already hold a reference, which is all that matters
+	// vecinner_free will never attempt to free a transitively referenced node
 	atomic_fetch_add_explicit(refc, 1, memory_order_relaxed);
 }
 
@@ -45,8 +46,9 @@ static inline struct VecInner *vecinner_clone(struct VecInner *node)
 	memcpy(copy, node, sizeof *copy);
 	for(int i = 0; i < M; i++) {
 		struct VecInner *child = node->children[i];
-		if(child)
-			incref(&child->refc);
+		if(!child)
+			break;
+		incref(&child->refc);
 	}
 	copy->refc = 1;
 	return copy;
@@ -75,11 +77,10 @@ static void vecleaf_free(struct VecLeaf *leaf)
 static void vecinner_free(struct VecInner *node, int shift)
 {
 	if(shift) {
-		// acquire-release is necessary to ensure accesses from other threads
-		// finish before attempting to free children. See:
-		// https://boost.org/doc/libs/1_55_0/doc/html/atomic/usage_examples.html
 		if(atomic_fetch_sub_explicit(&node->refc, 1, memory_order_release) == 1) {
+			// release: accesses must complete BEFORE here
 			atomic_thread_fence(memory_order_acquire);
+			// acquire: destructor code must run AFTER this point
 			for(int i = 0; i < M; i++) {
 				struct VecInner *child = node->children[i];
 				if(!child) // nodes are left-dense and never shrink (no pops)
@@ -91,9 +92,8 @@ static void vecinner_free(struct VecInner *node, int shift)
 			}
 			free(node);
 		}
-	} else {
+	} else
 		vecleaf_free((struct VecLeaf *)node);
-	}
 }
 
 // These provide sufficient guarantees for safe copy-on-write as we always
@@ -104,18 +104,11 @@ static void vecinner_free(struct VecInner *node, int shift)
 // X' through a call to ensure_*_editable increases the reference count of X's
 // children (to at least 2, from X and X'), and thus the same reasoning
 // inductively applies to any child of X.
-//
-// TODO determine if acquire above is even necessary if we're just cloning
-// children like this
 static inline void ensure_inner_editable(struct VecInner **nodeptr, int shift)
 {
 	struct VecInner *node = *nodeptr;
-	int expect_one = 1;
-	if (atomic_compare_exchange_strong_explicit(&node->refc, &expect_one, 0,
-		memory_order_acquire, memory_order_relaxed)) {
-		// X: we just acquired. It's not necessary to synchronize here
-		incref(&node->refc);
-	} else { // refc >= 2 or = 0 at point X above, no mutation is possible
+	// ensure in-place mutation happens AFTER checking the refcount
+	if(atomic_load_explicit(&node->refc, memory_order_acquire) != 1) {
 		struct VecInner *copy = vecinner_clone(node);
 		vecinner_free(node, shift);
 		*nodeptr = copy;
@@ -125,11 +118,7 @@ static inline void ensure_inner_editable(struct VecInner **nodeptr, int shift)
 static inline void ensure_leaf_editable(struct VecLeaf **nodeptr)
 {
 	struct VecLeaf *node = *nodeptr;
-	int expect_one = 1;
-	if (atomic_compare_exchange_strong_explicit(&node->refc, &expect_one, 0,
-		memory_order_acquire, memory_order_relaxed)) {
-		incref(&node->refc);
-	} else {
+	if(atomic_load_explicit(&node->refc, memory_order_acquire) != 1) {
 		struct VecLeaf *copy = vecleaf_clone(node);
 		vecleaf_free(node);
 		*nodeptr = copy;
@@ -203,7 +192,7 @@ static void insert_leaf(Vector *v, struct VecLeaf *leaf)
 		newroot->refc = 1;
 		newroot->children[0] = v->root;
 		newroot->children[1] = new_path(v->shift, leaf);
-		v->root = newroot;
+		v->root = newroot; // old root refc unchanged
 		v->shift += SHIFT_BITS;
 	} else {
 		ensure_inner_editable(&v->root, v->shift);
@@ -351,17 +340,19 @@ fail:
 	return false;
 }
 
-#if false
+#if 0
 int main(void)
 {
 	Vector *v = vector_new();
 	vector_append(v, "thing", 5);
 	Vector *old = vector_clone(v);
 	printf("leaves: %zd, inner: %zd\n",
-			sizeof(struct VecLeaf), sizeof(struct VecInner));
+			sizeof(struct VecLeaf),
+			sizeof(struct VecInner));
 	struct timespec before, after;
 	clock_gettime(CLOCK_REALTIME, &before);
 	for(int i = 0; i < 100000; i++) {
+		//old = vector_clone(v);
 		vector_append(v, "thang", 5);
 	}
 	clock_gettime(CLOCK_REALTIME, &after);
@@ -369,10 +360,10 @@ int main(void)
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
 			(after.tv_sec - before.tv_sec) * 1000,
 			v->size);
-	vector_to_dot(old, "debug.dot");
-	vector_free(old);
 	vector_to_dot(v, "final.dot");
 	vector_free(v);
+	vector_to_dot(old, "debug.dot");
+	vector_free(old);
 	return 0;
 }
 #endif
