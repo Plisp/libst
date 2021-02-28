@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wno-shift-op-parentheses
+CFLAGS = -Wall
 DFLAGS = -Wextra -g
 
 debug:

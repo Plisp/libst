@@ -22,7 +22,7 @@ struct piece {
 };
 
 #define BLKSIZE (1<<20)
-enum blktype { HEAP, MMAP };
+enum blktype { DATA, HEAP, MMAP };
 
 struct block {
 	enum blktype type;
@@ -40,7 +40,8 @@ struct PieceTable {
 
 /* simple */
 
-long pt_size(PieceTable *pt) {
+long pt_size(PieceTable *pt)
+{
 	return pt->bytes;
 }
 
@@ -51,6 +52,14 @@ static long count_lfs(struct piece *node, long off, long bytes)
 		if(node->data[i] == '\n')
 			count++;
 	return count;
+}
+
+long pt_lfs(PieceTable *pt)
+{
+	long lfs = 0;
+	for(long i = 0; i < pt->size; i++)
+		lfs += count_lfs(&pt->vec[i], 0, pt->vec[i].bytes);
+	return lfs;
 }
 
 void pt_print_node(struct piece *node)
@@ -84,7 +93,8 @@ void pt_print_struct_sizes(void)
 
 static struct block *block_append(struct block *b, char *data, long len)
 {
-	if(b->size + len <= b->capacity) { // should never hold for MMAP blocks
+	// should never hold for MMAP and DATA blocks
+	if(b->size + len <= b->capacity) {
 		assert(b->type == HEAP);
 		memcpy(b->data + b->size, data, len);
 		b->size += len;
@@ -112,10 +122,11 @@ PieceTable *pt_new_from_data(const char *data, long len)
 	struct block *init = pt->blocks;
 	*init = (struct block) {
 		.next = NULL,
-		.type = HEAP,
+		.type = DATA,
 		.size = len, .capacity = len,
 		.data = (char *)data
 	};
+	// we take ownership of data directly
 	//memcpy(init->data, data, len);
 
 	pt->bytes = len;
@@ -162,10 +173,11 @@ fail:
 
 static void free_block(struct block *b)
 {
-	if(b->type == HEAP)
-		free(b->data);
-	else // if(pt->init.type == MMAP)
-		munmap(b->data, b->size);
+	switch(b->type) {
+		case DATA: break;
+		case HEAP: free(b->data); break;
+		case MMAP: munmap(b->data, b->size); break;
+	}
 	free(b);
 }
 
@@ -176,62 +188,106 @@ void pt_free(PieceTable *pt)
 		next = b->next;
 		free_block(b);
 	}
-
 	free(pt->vec);
 	free(pt);
 }
 
-bool pt_insert(PieceTable *pt, long pos, char *data, long len)
+struct piece *pt_search(PieceTable *pt, long pos, long *off)
+{
+	struct piece *node = pt->vec;
+	while(pos > node->bytes) {
+		pos -= node->bytes;
+		node++;
+	}
+	*off = pos;
+	return node;
+}
+
+void expand_vec(PieceTable *pt)
+{
+	pt->capacity *= 2;
+	pt->vec = realloc(pt->vec, pt->capacity*sizeof(struct piece));
+}
+
+void pt_insert(PieceTable *pt, long pos, char *data, long len)
 {
 	struct block *new_block = block_append(pt->blocks, data, len);
 	if(new_block) {
 		new_block->next = pt->blocks;
 		pt->blocks = new_block;
 	}
-	pt->bytes += len;
 	char *inserted_data = pt->blocks->data + pt->blocks->size - len;
 	struct piece new = { .bytes = len, .data = inserted_data };
-	struct piece *old = pt->vec;
-	long off = pos;
-	for(long i = 0; i < pt->size; i++) {
-		if(off <= old->bytes)
-			break;
-		off -= old->bytes;
-		old++;
-	}
+	long off;
+	struct piece *old = pt_search(pt, pos, &off);
 	if(off == old->bytes) {
-		pt_dbg("insertion at boundary\n");
-		long index = old - pt->vec;
-		if(pt->size == pt->capacity) {
-			pt->capacity *= 2;
-			pt->vec = realloc(pt->vec, pt->capacity*sizeof(struct piece));
-		}
+		// insertion after piece boundary
+		long index = old - pt->vec + 1;
 		long count = pt->size - index;
-		pt_nodes_moved += count;
+		if(pt->size == pt->capacity) expand_vec(pt);
 		memmove(&pt->vec[index+1], &pt->vec[index], count*sizeof(struct piece));
 		pt->vec[index] = new;
 		pt->size++;
+		pt_nodes_moved += count;
 	} else {
-		struct piece new_left = { .bytes = off, .data = old->data, };
+		// split piece in two
+		struct piece new_left = { .bytes = off, .data = old->data };
 		struct piece new_right = {
 			.bytes = old->bytes - off,
 			.data = old->data + off,
 		};
 		long index = old - pt->vec;
-		if(pt->size + 2 > pt->capacity) {
-			pt->capacity *= 2;
-			pt->vec = realloc(pt->vec, pt->capacity*sizeof(struct piece));
-		}
 		long count = pt->size - index;
-		pt_nodes_moved += count;
+		if(pt->size + 2 > pt->capacity) expand_vec(pt);
 		memmove(&pt->vec[index+2], &pt->vec[index], count*sizeof(struct piece));
 		pt->vec[index] = new_left;
 		pt->vec[index+1] = new;
 		pt->vec[index+2] = new_right;
 		pt->size += 2;
+		pt_nodes_moved += count;
 	}
-	return true;
+	pt->bytes += len;
 }
+
+void pt_erase(PieceTable *pt, long pos, long len)
+{
+	len = MIN(len, pt_size(pt) - pos + 1);
+	long off;
+	struct piece *start, *end;
+	struct piece *piece = pt_search(pt, pos, &off);
+	// start boundary
+	len -= piece->bytes - off;
+	piece->bytes = off;
+	start = ++piece;
+	// intermediates
+	while(len > piece->bytes) {
+		len -= piece->bytes;
+		piece++;
+	}
+	// end boundary
+	if(len == piece->bytes) {
+		end = piece + 1;
+	} else {
+		end = piece;
+		piece->bytes -= len;
+		piece->data += len;
+	}
+	long count = pt->vec + pt->size - end;
+	memmove(start, end, count*sizeof(struct piece));
+	pt->size -= end - start;
+	pt_nodes_moved += count;
+	pt->bytes -= len;
+	if(pt->size < pt->capacity/2) {
+		pt->capacity /= 2;
+		pt->vec = realloc(pt->vec, pt->capacity * sizeof(struct piece));
+	}
+}
+
+/* iterator */
+
+//PieceIterator *pt_iter_get
+
+/* dot output */
 
 #include "dot.h"
 
@@ -246,13 +302,15 @@ void pt_array_to_dot(PieceTable *pt, FILE *file)
 {
 	graph_link(file, pt, "vec", pt->vec, "body");
 	graph_table_begin(file, pt->vec, "aquamarine3");
+	char *tmp = NULL;
+	char *port = NULL;
 	for(long i = 0; i < pt->size; i++) {
-		char *tmp = NULL;
-		char *port = NULL;
 		FSTR(port, "%ld", i);
 		FSTR(tmp, "len: %ld", pt->vec[i].bytes);
 		graph_table_entry(file, tmp, port);
 	}
+	free(tmp);
+	free(port);
 	graph_table_end(file);
 	// output links
 	for(long i = 1; i < pt->size; i++)
@@ -277,6 +335,7 @@ bool pt_to_dot(PieceTable *pt)
 	graph_table_end(file);
 	pt_array_to_dot(pt, file);
 	graph_end(file);
+	free(tmp);
 	if(fclose(file) < 0)
 		goto fail;
 	return true;

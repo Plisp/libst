@@ -125,11 +125,13 @@ static inline void ensure_leaf_editable(struct VecLeaf **nodeptr)
 	}
 }
 
-static inline long tail_index(Vector *v) {
+static inline long tail_index(Vector *v)
+{
 	return v->size-1 & ~(M-1);
 }
 
-static inline long tail_size(Vector *v) {
+static inline long tail_size(Vector *v)
+{
 	return v->size ? (v->size-1 & M-1) + 1 : 0;
 }
 
@@ -330,13 +332,13 @@ bool vector_to_dot(Vector *v, const char *path)
 		vecinner_to_dot(file, v->root, v->shift);
 	graph_end(file);
 
+	free(tmp);
 	if(!fclose(file))
 		goto fail;
 	return true;
 
 fail:
 	perror("pt_to_dot");
-	free(tmp);
 	return false;
 }
 

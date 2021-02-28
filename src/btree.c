@@ -44,7 +44,8 @@ struct PieceTable {
 	Vector *append;
 };
 
-void pt_print_struct_sizes(void) {
+void pt_print_struct_sizes(void)
+{
 	printf(
 		"Implementation: \e[38;5;1mbtree\e[0m\n"
 		"sizeof(struct piece): %zd\n"
