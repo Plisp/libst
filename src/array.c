@@ -14,7 +14,7 @@
 
 #include "pt.h"
 
-long pt_nodes_moved = 0;
+long pt_pieces_moved = 0;
 
 struct piece {
 	long bytes;  /* length */
@@ -45,11 +45,11 @@ long pt_size(PieceTable *pt)
 	return pt->bytes;
 }
 
-static long count_lfs(struct piece *node, long off, long bytes)
+static long count_lfs(struct piece *piece, long off, long bytes)
 {
 	long count = 0;
 	for(long i = off; i < bytes; i++)
-		if(node->data[i] == '\n')
+		if(piece->data[i] == '\n')
 			count++;
 	return count;
 }
@@ -62,19 +62,20 @@ long pt_lfs(PieceTable *pt)
 	return lfs;
 }
 
-void pt_print_node(struct piece *node)
+void pt_pprint_piece(struct piece *piece)
 {
 	printf("┃piece with %7ld bytes ┃ %7ld lfs ┃ data: %5.*s...┃\n",
-			node->bytes, count_lfs(node, 0, node->bytes),
-			(int)MIN(5, node->bytes), node->data);
+			piece->bytes, count_lfs(piece, 0, piece->bytes),
+			(int)MIN(5, piece->bytes), piece->data);
 }
 
 void pt_pprint(PieceTable *pt)
 {
-	printf("PieceTable with %ld/%ld nodes\n", pt->size, pt->capacity);
+	printf("PieceTable with %ld/%ld pieces, %ld bytes\n",
+			pt->size, pt->capacity, pt_size(pt));
 	puts("┏━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓");
 	for(long i = 0; i < pt->size; i++)
-		pt_print_node(&pt->vec[i]);
+		pt_pprint_piece(&pt->vec[i]);
 	puts("┗━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━┛");
 }
 
@@ -194,23 +195,39 @@ void pt_free(PieceTable *pt)
 
 struct piece *pt_search(PieceTable *pt, long pos, long *off)
 {
-	struct piece *node = pt->vec;
-	while(pos > node->bytes) {
-		pos -= node->bytes;
-		node++;
+	struct piece *piece = pt->vec;
+	while(pos > piece->bytes) {
+		pos -= piece->bytes;
+		piece++;
 	}
 	*off = pos;
-	return node;
+	return piece;
 }
 
-void expand_vec(PieceTable *pt)
+void maybe_expand_vec(PieceTable *pt)
 {
-	pt->capacity *= 2;
-	pt->vec = realloc(pt->vec, pt->capacity*sizeof(struct piece));
+	// this still works worst case:
+	// the faliure case: c+2 > 2c <=> c <= 1
+	// However capacity >= 2 from the moment of table creation
+	// invariant is preserved after maybe_shrink as c >= 2 && s >= 1 (sentinel)
+	// which means we cannot have s < c/2 as necessary for shrinking here.
+	if(pt->size > pt->capacity) {
+		pt->capacity *= 2;
+		pt->vec = realloc(pt->vec, pt->capacity * sizeof(struct piece));
+	}
+}
+
+void maybe_shrink_vec(PieceTable *pt)
+{
+	if(pt->size < pt->capacity/2) {
+		pt->capacity /= 2;
+		pt->vec = realloc(pt->vec, pt->capacity * sizeof(struct piece));
+	}
 }
 
 void pt_insert(PieceTable *pt, long pos, char *data, long len)
 {
+	if(len == 0) return;
 	struct block *new_block = block_append(pt->blocks, data, len);
 	if(new_block) {
 		new_block->next = pt->blocks;
@@ -218,68 +235,78 @@ void pt_insert(PieceTable *pt, long pos, char *data, long len)
 	}
 	char *inserted_data = pt->blocks->data + pt->blocks->size - len;
 	struct piece new = { .bytes = len, .data = inserted_data };
-	long off;
-	struct piece *old = pt_search(pt, pos, &off);
-	if(off == old->bytes) {
-		// insertion after piece boundary
+	struct piece *old = pt_search(pt, pos, &pos);
+	if(pos == old->bytes) {
 		long index = old - pt->vec + 1;
 		long count = pt->size - index;
-		if(pt->size == pt->capacity) expand_vec(pt);
-		memmove(&pt->vec[index+1], &pt->vec[index], count*sizeof(struct piece));
-		pt->vec[index] = new;
 		pt->size++;
-		pt_nodes_moved += count;
+		maybe_expand_vec(pt);
+		struct piece *start = &pt->vec[index];
+		memmove(start + 1, start, count*sizeof(struct piece));
+		*start = new;
+		pt_pieces_moved += count;
 	} else {
-		// split piece in two
-		struct piece new_left = { .bytes = off, .data = old->data };
-		struct piece new_right = {
-			.bytes = old->bytes - off,
-			.data = old->data + off,
-		};
+		struct piece new_left = { .bytes = pos, .data = old->data };
+		struct piece new_right = { old->bytes - pos, old->data + pos };
 		long index = old - pt->vec;
 		long count = pt->size - index;
-		if(pt->size + 2 > pt->capacity) expand_vec(pt);
-		memmove(&pt->vec[index+2], &pt->vec[index], count*sizeof(struct piece));
-		pt->vec[index] = new_left;
-		pt->vec[index+1] = new;
-		pt->vec[index+2] = new_right;
 		pt->size += 2;
-		pt_nodes_moved += count;
+		maybe_expand_vec(pt);
+		struct piece *start = &pt->vec[index];
+		memmove(start + 2, start, count*sizeof(struct piece));
+		start[0] = new_left;
+		start[1] = new;
+		start[2] = new_right;
+		pt_pieces_moved += count;
 	}
 	pt->bytes += len;
 }
 
 void pt_erase(PieceTable *pt, long pos, long len)
 {
-	len = MIN(len, pt_size(pt) - pos + 1);
-	long off;
-	struct piece *start, *end;
-	struct piece *piece = pt_search(pt, pos, &off);
-	// start boundary
-	len -= piece->bytes - off;
-	piece->bytes = off;
-	start = ++piece;
-	// intermediates
-	while(len > piece->bytes) {
-		len -= piece->bytes;
-		piece++;
-	}
-	// end boundary
-	if(len == piece->bytes) {
-		end = piece + 1;
-	} else {
-		end = piece;
-		piece->bytes -= len;
-		piece->data += len;
-	}
-	long count = pt->vec + pt->size - end;
-	memmove(start, end, count*sizeof(struct piece));
-	pt->size -= end - start;
-	pt_nodes_moved += count;
+	if(len == 0) return;
+	len = MIN(len, pt_size(pt) - pos);
 	pt->bytes -= len;
-	if(pt->size < pt->capacity/2) {
-		pt->capacity /= 2;
-		pt->vec = realloc(pt->vec, pt->capacity * sizeof(struct piece));
+	struct piece *piece = pt_search(pt, pos, &pos);
+	if(len < piece->bytes - pos) { // common case: piece split
+		struct piece new_right = {
+			.bytes = piece->bytes - pos - len,
+			.data = piece->data + pos + len
+		};
+		piece->bytes = pos;
+		long index = piece+1 - pt->vec;
+		long count = pt->vec + pt->size - (piece+1);
+		pt->size++;
+		maybe_expand_vec(pt);
+		struct piece *start = &pt->vec[index];
+		memmove(start + 1, start, count*sizeof(struct piece));
+		*start = new_right;
+		pt_pieces_moved += count;
+	} else {
+		struct piece *start, *end;
+		len -= piece->bytes - pos;
+		piece->bytes = pos;
+		if(len > 0) {
+			start = ++piece;
+			while(len > piece->bytes) {
+				len -= piece->bytes;
+				piece++;
+			}
+		} else {
+			start = piece; // end boundary: start = end
+		}
+		if(len == piece->bytes) {
+			end = piece + 1;
+		} else { // len = 0 from above is ok
+			end = piece;
+			piece->bytes -= len;
+			piece->data += len;
+		}
+		long count = pt->vec + pt->size - end;
+		memmove(start, end, count*sizeof(struct piece));
+		pt->size -= end - start;
+		maybe_shrink_vec(pt);
+		pt_pieces_moved += count;
 	}
 }
 
@@ -314,7 +341,7 @@ void pt_array_to_dot(PieceTable *pt, FILE *file)
 	graph_table_end(file);
 	// output links
 	for(long i = 1; i < pt->size; i++)
-		fprintf(file, "\n  x%ld:%ld -> %.*s [style=dashed];\n",
+		fprintf(file, "\n  x%ld:%ld -> \"%.*s\" [style=dashed];\n",
 				(long)pt->vec, i,
 				MIN((int)pt->vec[i].bytes, 15), pt->vec[i].data);
 }

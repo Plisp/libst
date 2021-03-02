@@ -18,7 +18,7 @@ void graph_link(FILE *file, const void *a, const char *port_a,
 
 void graph_link_str(FILE *file, const void *a, const char *s, int len)
 {
-	fprintf(file, "  x%ld -> %.*s\n", (long)a, len, s);
+	fprintf(file, "  x%ld -> \"%.*s\"\n", (long)a, len, s);
 }
 
 void graph_table_begin(FILE *file, const void *o, const char *color)
