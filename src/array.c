@@ -285,7 +285,7 @@ void pt_erase(PieceTable *pt, long pos, long len)
 	} else {
 		struct piece *start, *end;
 		len -= piece->bytes - pos;
-		piece->bytes = pos;
+		piece->bytes = pos; // pos > 0
 		if(len > 0) {
 			start = ++piece;
 			while(len > piece->bytes) {
@@ -293,9 +293,9 @@ void pt_erase(PieceTable *pt, long pos, long len)
 				piece++;
 			}
 		} else {
-			start = piece; // end boundary: start = end
+			start = piece; // end boundary: start = end, don't look further
 		}
-		if(len == piece->bytes) {
+		if(len == piece->bytes) { // len != 0 esp. when piece is the sentinel
 			end = piece + 1;
 		} else { // len = 0 from above is ok
 			end = piece;

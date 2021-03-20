@@ -12,7 +12,7 @@
 
 typedef atomic_uint RefCount;
 
-#define NODESIZE 512
+#define NODESIZE 256
 #define PER_B (sizeof(struct node *) + sizeof(long))
 #define B (NODESIZE / PER_B)
 struct node {
@@ -69,7 +69,7 @@ PieceTable *pt_new_from_data(const char *data, long len)
 	// TODO:
 	pt->append = vector_new();
 	vector_append(pt->append, data, len);
-	printf("size: %d\n", pt->append->size);
+	printf("size: %zd\n", pt->append->size);
 	return pt;
 }
 
