@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wall -Wno-parentheses
+CFLAGS = -Wall -Wno-parentheses -std=c11 -D_POSIX_C_SOURCE=199309
 DFLAGS = -Wextra -g
 
 debug:
@@ -7,8 +7,8 @@ debug:
 	$(CC) btree.c main.c -o btree $(CFLAGS) $(DFLAGS)
 
 opt:
-	$(CC) array.c main.c -o array -O3 $(CFLAGS)
-	$(CC) btree.c main.c -o btree -O3 $(CFLAGS)
+	$(CC) array.c main.c -o array -O3 $(CFLAGS) -DNDEBUG
+	#$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG
 
 dot:
 	./array
@@ -17,15 +17,4 @@ dot:
 	#dot -Tpng btree.dot -o btree.png
 
 clean:
-	rm -f array btree vector *.dot *.png
-
-vec:
-	$(CC) -O3 vector.c -Wno-shift-op-parentheses -o vector
-	#valgrind --leak-check=full ./vector
-	./vector
-
-d:
-	dot -o debug.png -Tpng debug.dot
-
-f:
-	dot -o final.png -Tpng final.dot
+	rm -f array btree *.dot *.png

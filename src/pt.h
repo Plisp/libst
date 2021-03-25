@@ -18,9 +18,10 @@ typedef struct PieceIterator PieceIterator;
 
 /* API */
 
-PieceTable *pt_new_from_data(const char *data, long len);
-PieceTable *pt_new_from_file(const char *path, long len, long off);
+PieceTable *pt_new(void);
 void pt_free(PieceTable *pt);
+PieceTable *pt_new_from_file(const char *path, long len, long off);
+PieceTable *pt_write_file(PieceTable *pt, const char *path);
 
 long pt_size(PieceTable *pt);
 long pt_lfs(PieceTable *pt);
@@ -32,13 +33,13 @@ void pt_pprint(PieceTable *pt);
 void pt_print_struct_sizes(void);
 bool pt_to_dot(PieceTable *pt);
 
-/* PieceIterator API */
+/* iterator */
 
 PieceIterator *pt_iter_get(PieceTable *pt, long pos);
-PieceIterator *pt_iter_clone(PieceIterator *);
+PieceIterator *pt_iter_clone(PieceIterator *it);
 
-long pt_iter_pos(PieceIterator *);
-long pt_iter_visual_col(PieceIterator *);
+long pt_iter_pos(PieceIterator *it);
+long pt_iter_visual_col(PieceIterator *it);
 
 bool pt_iter_next_byte(PieceIterator *it, long count);
 bool pt_iter_prev_byte(PieceIterator *it, long count);

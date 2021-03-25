@@ -31,7 +31,7 @@ struct VecLeaf {
 
 typedef struct {
 	long size;
-	long shift;
+	int shift;
 	struct VecInner *root;
 	struct VecLeaf *tail;
 } Vector;
@@ -237,8 +237,8 @@ void vector_append(Vector *v, const char *s, long len)
 		} else {
 			insert_leaf(v, v->tail);
 		}
-		int chunks = (len - 1) / ML; // len >= 1
-		for(int i = 0; i < chunks; i++) {
+		long chunks = (len - 1) / ML; // len >= 1
+		for(long i = 0; i < chunks; i++) {
 			struct VecLeaf *new = malloc(sizeof *new);
 			new->refc = 1;
 			memcpy(new->text, s, ML);
@@ -293,8 +293,8 @@ void vecinner_to_dot(FILE *file, const struct VecInner *root, int shift)
 	graph_table_begin(file, root, NULL);
 	FSTR(tmp, "refs: %d", root->refc);
 	graph_table_entry(file, tmp, NULL);
-	for(long i = 0; i < M; i++) {
-		FSTR(tmp, "%ld", i);
+	for(int i = 0; i < M; i++) {
+		FSTR(tmp, "%d", i);
 		graph_table_entry(file, tmp, tmp);
 	}
 	graph_table_end(file);
@@ -321,7 +321,7 @@ bool vector_to_dot(Vector *v, const char *path)
 	graph_table_begin(file, v, NULL);
 	FSTR(tmp, "size: %ld", v->size);
 	graph_table_entry(file, tmp, NULL);
-	FSTR(tmp, "shift: %ld", v->shift);
+	FSTR(tmp, "shift: %d", v->shift);
 	graph_table_entry(file, tmp, NULL);
 	graph_table_entry(file, "root", "root");
 	graph_table_entry(file, "tail", "tail");
