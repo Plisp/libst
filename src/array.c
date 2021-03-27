@@ -32,16 +32,15 @@ struct block {
 };
 
 struct piece {
-	struct block *block; /* data block */
-	long offset; /* offset into block */
-	long bytes; /* length */
+	struct block *block; // data block
+	long offset; // offset into block
+	long bytes; // length
 };
 
 struct PieceTable {
-	long bytes; /* byte count */
-	struct block *init; /* initial block */
-	long size, capacity; /* no. of pieces in array */
-	struct piece *vec; /* an array of pieces */
+	long bytes; // byte count
+	long size, capacity; // no. of pieces in array
+	struct piece *vec; // an array of pieces
 };
 
 /* simple */
@@ -130,13 +129,19 @@ static struct block *new_block(const char *data, long len)
 static void free_block(struct block *block)
 {
 	switch(block->type) {
-	case IMMUT_MMAP: return; // pt->init handled specially by pt_free
-	case HEAP: free(block->data); break;
+	case HEAP: free(block->data); free(block); break;
+	case IMMUT_MMAP:
+		if(--block->refs == 0) {
+			munmap(block->data, block->size);
+			free(block);
+		}
+		break;
 	case IMMUT:
-		if(--block->refs == 0)
+		if(--block->refs == 0) {
 			free(block->data);
+			free(block);
+		}
 	}
-	free(block);
 }
 
 static void block_insert(struct block *block, long offset, const char *data,
@@ -167,9 +172,9 @@ PieceTable *pt_new(void)
 	pt->vec = malloc(sizeof(struct piece));
 	pt->size = pt->capacity = 1;
 	pt->bytes = 0;
-	pt->init = malloc(sizeof(struct block));
-	*pt->init = (struct block){ .type = IMMUT, .refs = 1 };
-	pt->vec[0] = (struct piece){ .bytes = 0, .block = pt->init };
+	struct block *init = malloc(sizeof(struct block));
+	*init = (struct block){ .type = IMMUT, .refs = 1 };
+	pt->vec[0] = (struct piece){ .bytes = 0, .block = init };
 	return pt;
 }
 
@@ -190,17 +195,18 @@ PieceTable *pt_new_from_file(const char *path, long len, long off)
 	pt->vec = malloc(2 * sizeof(struct piece));
 	pt->size = pt->capacity = 2;
 	pt->bytes = len;
-	pt->init = malloc(sizeof(struct block));
-	*pt->init = (struct block){
+	struct block *init = malloc(sizeof(struct block));
+	*init = (struct block){
 		.type = IMMUT_MMAP,
+		.refs = 2,
 		.size = len,
 		.data = data,
 	};
-	pt->vec[0] = (struct piece){ .bytes = 0, .block = pt->init };
+	pt->vec[0] = (struct piece){ .bytes = 0, .block = init };
 	pt->vec[1] = (struct piece){
 		.bytes = len,
 		.offset = 0,
-		.block = pt->init,
+		.block = init,
 	};
 	return pt;
 }
@@ -209,10 +215,6 @@ void pt_free(PieceTable *pt)
 {
 	for(long i = 0; i < pt->size; i++)
 		free_block(pt->vec[i].block);
-	// goes after
-	if(pt->init->type == IMMUT_MMAP)
-		munmap(pt->init->data, pt->init->size);
-	free(pt->init);
 	free(pt->vec);
 	free(pt);
 }
@@ -294,7 +296,7 @@ void pt_insert(PieceTable *pt, long pos, char *data, long len)
 			.bytes = old->bytes - pos,
 			.offset = old->offset + pos,
 		};
-		if(old->block->type == IMMUT)
+		if(old->block->type == IMMUT || old->block->type == IMMUT_MMAP)
 			old->block->refs++;
 		long index = old - pt->vec + 1;
 		long count = pt->size - index;
@@ -326,7 +328,9 @@ void pt_erase(PieceTable *pt, long pos, long len)
 				.bytes = piece->bytes - pos - len,
 				.offset = piece->offset + pos + len
 			};
-			piece->block->refs++;
+			if(piece->block->type == IMMUT ||
+			   piece->block->type == IMMUT_MMAP)
+				piece->block->refs++;
 			piece->bytes = pos;
 			long index = piece + 1 - pt->vec;
 			long count = pt->vec + pt->size - (piece + 1);
@@ -411,9 +415,9 @@ static void pt_array_to_dot(PieceTable *pt, FILE *file)
 	}
 }
 
-bool pt_to_dot(PieceTable *pt)
+bool pt_to_dot(PieceTable *pt, const char *path)
 {
-	FILE *file = fopen("array.dot", "w");
+	FILE *file = fopen(path, "w");
 	char *tmp = NULL; // realloc
 	if(!file)
 		goto fail;

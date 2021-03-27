@@ -31,7 +31,7 @@ void pt_erase(PieceTable *pt, long pos, long len);
 
 void pt_pprint(PieceTable *pt);
 void pt_print_struct_sizes(void);
-bool pt_to_dot(PieceTable *pt);
+bool pt_to_dot(PieceTable *pt, const char *path);
 
 /* iterator */
 
