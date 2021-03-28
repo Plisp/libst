@@ -11,7 +11,8 @@ opt:
 	#$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG
 
 dot:
-	./a.out
+	gcc $(CFLAGS) $(DFLAGS) btree.c -o btree
+	./btree
 	dot -Tpng t.dot -o t.png
 	#./array
 	#dot -Tpng array.dot -o array.png
