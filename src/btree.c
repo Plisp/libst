@@ -1,114 +1,100 @@
 /*
- * b+tree-based piece sequence adapted from linux kernel implementation
+ * b+tree-based piece sequence
  */
 
 #include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "pt.h"
+#include <sys/types.h>
 
+// TODO what are good values?
 #define LOW_WATER 256
 #define HIGH_WATER 4096
 
-enum blktype { IMMUT, IMMUT_MMAP, HEAP };
+enum blktype { IMMUT, IMMUT_MMAP, MUT, PTABLE };
 struct block {
 	enum blktype type;
 	int refs; // only for IMMUT blocks
-	char *data;
+	void *data;
 	long len;
 };
 
 struct piece {
 	struct block *blk;
-	unsigned long len;
+	unsigned long offset;
 };
 
+// TODO try larger powers
 #define NODESIZE 128
-#define PER_B (sizeof(void *) + sizeof(long))
+#define PER_B (sizeof(struct inner *) + sizeof(long))
 #define B (NODESIZE / PER_B)
 struct inner {
-	long bytes[B];
+	unsigned long spans[B];
 	struct inner *children[B];
 };
 
 #define PER_BL (sizeof(struct piece) + sizeof(long))
 #define BL (NODESIZE / PER_BL)
 struct leaf {
-	long spans[BL];
+	unsigned long spans[BL];
 	struct piece pieces[BL];
 };
+
+#define LVAL(leaf, i) (leaf->spans[i] != ULONG_MAX ? &leaf->pieces[i] : NULL)
+
+#define IKEYS(node) ((unsigned long *)&node->spans)
+#define IVALS(node) ((struct inner *)&node->children)
+#define LKEYS(leaf) ((unsigned long *)&leaf->spans)
+#define LVALS(leaf) ((struct piece *)&leaf->pieces)
 
 struct PieceTable {
 	struct inner *root;
 	unsigned height;
 };
 
-static struct inner *btree_node_alloc(unsigned height)
+static void leaf_clrslots(struct leaf *leaf, unsigned from, unsigned to)
 {
-	if(height == 1) {
-		struct leaf *leaf = malloc(sizeof *leaf);
-		memset(leaf, 0, sizeof(struct leaf));
-		return (struct inner *)leaf;
-	} else {
-		struct inner *node = malloc(sizeof *node);
-		memset(node, 0, sizeof(struct inner));
-		return node;
+	assert(to <= BL);
+	for(unsigned i = from; i < to; i++)
+		leaf->spans[i] = ULONG_MAX;
+}
+
+static void inner_clrslots(struct inner *node, unsigned from, unsigned to)
+{
+	assert(to <= B);
+	for(unsigned i = from; i < to; i++) {
+		node->spans[i] = ULONG_MAX;
 	}
+	memset(IVALS(node) + from, 0, (to - from) * sizeof(struct inner *));
 }
 
-static unsigned long bkey(unsigned level, struct inner *node, unsigned n)
+static struct leaf *leaf_alloc(void)
 {
-	if(level == 1) {
-		struct leaf *leaf = (struct leaf *)node;
-		return leaf->spans[n];
-	} else
-		return node->bytes[n];
+	struct leaf *leaf = malloc(sizeof *leaf);
+	leaf_clrslots(leaf, 0, BL);
+	return leaf;
 }
 
-static void setkey(unsigned level, struct inner *node, unsigned n, long val)
+static struct inner *inner_alloc(void)
 {
-	if(level == 1) {
-		struct leaf *leaf = (struct leaf *)node;
-		assert(n < BL);
-		leaf->spans[n] = val;
-	} else
-		node->bytes[n] = val;
+	struct inner *node = malloc(sizeof *node);
+	inner_clrslots(node, 0, B);
+	return node;
 }
 
-static void *bval(unsigned level, struct inner *node, unsigned n)
+static unsigned long spansum(unsigned level, struct inner *node, unsigned fill)
 {
-	if(level == 1) {
-		struct leaf *leaf = (struct leaf *)node;
-		assert(n < BL);
-		struct piece *piece = &leaf->pieces[n];
-		// N.B. returns NULL on absent value
-		return piece->len > 0 ? piece : NULL;
-	} else
-		return node->children[n];
-}
-
-static void setval(unsigned level, struct inner *node, unsigned n, void *val)
-{
-	if(level == 1) {
-		struct leaf *leaf = (struct leaf *)node;
-		assert(n < BL);
-		leaf->pieces[n] = *(struct piece *)val;
-	} else
-		node->children[n] = val;
-}
-
-static void clearpair(unsigned level, struct inner *node, unsigned n)
-{
-	if(level == 1) {
-		struct leaf *leaf = (struct leaf *)node;
-		assert(n < BL);
-		leaf->spans[n] = 0;
-		leaf->pieces[n] = (struct piece){ 0 };
-	} else {
-		node->bytes[n] = 0;
-		node->children[n] = 0;
-	}
+	unsigned long sum = 0;
+	if(level == 1)
+		for(unsigned i = 0; i < fill; i++)
+			sum += ((struct leaf *)node)->spans[i];
+	else
+		for(unsigned i = 0; i < fill; i++)
+			sum += node->spans[i];
+	return sum;
 }
 
 /* debug */
@@ -116,7 +102,7 @@ static void clearpair(unsigned level, struct inner *node, unsigned n)
 void pt_print_struct_sizes(void)
 {
 	fprintf(stderr,
-		"Implementation: \e[38;5;1mbtree\e[0m\n"
+		"Implementation: \e[38;5;1mpt\e[0m\n"
 		"sizeof(struct inner): %zd\n"
 		"sizeof(struct leaf): %zd\n"
 		"sizeof(PieceTable): %zd\n",
@@ -127,27 +113,38 @@ static void print_node(unsigned level, struct inner *node)
 {
 	char out[256], *it = out;
 	if(level == 1) {
+		struct leaf *leaf = (struct leaf *)node;
 		it += sprintf(it, "[k: ");
-		for(unsigned i = 0; i < BL; i++)
-			it += sprintf(it, "%lu|", bkey(1, node, i));
+		for(unsigned i = 0; i < BL; i++) {
+			unsigned long key = leaf->spans[i];
+			if(key != ULONG_MAX)
+				it += sprintf(it, "%lu|", key);
+			else
+				it += sprintf(it, "NUL|");
+		}
 		it--;
 		it += sprintf(it, " p: ");
 		for(unsigned i = 0; i < BL; i++) {
-			struct piece *val = bval(1, node, i);
-			it += sprintf(it, "%lu|", val ? val->len : 0);
+			struct piece *val = LVAL(leaf, i);
+			it += sprintf(it, "%lu|", val ? val->offset : 0);
 		}
 		it--;
 		it += sprintf(it, "]");
 	} else {
-		printf("[k: ");
-		for(unsigned i = 0; i < B; i++)
-			it += sprintf(it, "%lu|", bkey(level, node, i));
+		for(unsigned i = 0; i < B; i++) {
+			unsigned long key = node->spans[i];
+			if(key != ULONG_MAX)
+				it += sprintf(it, "%lu|", key);
+			else
+				it += sprintf(it, "0|");
+		}
+		it--;
 		it += sprintf(it, "]");
 	}
 	fprintf(stderr, "%s\n", out);
 }
 
-// TODO this probably won't work well
+// TODO breadth-first
 void pt_pprint(PieceTable *pt)
 {
 	struct inner *root = pt->root;
@@ -170,7 +167,7 @@ void piece_to_dot(FILE *file, const struct piece *piece)
 		graph_table_entry(file, NULL, NULL);
 		return;
 	}
-	FSTR(tmp, "len: %lu", piece->len);
+	FSTR(tmp, "offset: %lu", piece->offset);
 	FSTR(port, "%lu", (long)piece->blk);
 	graph_table_entry(file, tmp, port);
 	// TODO link to block
@@ -184,11 +181,15 @@ void leaf_to_dot(FILE *file, const struct leaf *leaf)
 	char *tmp = NULL;
 	graph_table_begin(file, leaf, "aquamarine3");
 	for(unsigned i = 0; i < BL; i++) {
-		FSTR(tmp, "%lu", bkey(1, (void *)leaf, i));
+		unsigned long key = leaf->spans[i];
+		if(key != ULONG_MAX)
+			FSTR(tmp, "%lu", key);
+		else
+			tmp = NULL;
 		graph_table_entry(file, tmp, NULL);
 	}
 	for(unsigned i = 0; i < BL; i++)
-		piece_to_dot(file, bval(1, (void *)leaf, i));
+		piece_to_dot(file, LVAL(leaf, i));
 	graph_table_end(file);
 	free(tmp);
 }
@@ -198,18 +199,22 @@ void inner_to_dot(FILE *file, const struct inner *root, unsigned height)
 	if(!root)
 		return;
 	if(height == 1)
-		return leaf_to_dot(file, (void *)root);
+		return leaf_to_dot(file, (struct leaf *)root);
 	char *tmp = NULL, *port = NULL;
 	graph_table_begin(file, root, NULL);
 	for(unsigned i = 0; i < B; i++) {
-		FSTR(tmp, "%lu", bkey(height, (void *)root, i));
-		FSTR(port, "%u", i);
+		unsigned long key = root->spans[i];
+		if(key != ULONG_MAX) {
+			FSTR(tmp, "%lu", key);
+			FSTR(port, "%u", i);
+		} else
+			tmp = port = NULL;
 		graph_table_entry(file, tmp, port);
 	}
 	graph_table_end(file);
 	// output child links
 	for(unsigned i = 0; i < B; i++) {
-		struct inner *child = bval(height, (void *)root, i);
+		struct inner *child = root->children[i];
 		if(!child)
 			break;
 		FSTR(tmp, "%d", i);
@@ -239,7 +244,7 @@ bool pt_to_dot(PieceTable *pt, const char *path)
 	graph_end(file);
 
 	free(tmp);
-	if(!fclose(file))
+	if(fclose(file))
 		goto fail;
 	return true;
 
@@ -250,7 +255,7 @@ fail:
 
 /* basic */
 
-struct PieceTable *btree_new(void)
+struct PieceTable *pt_new(void)
 {
 	struct PieceTable *pt = malloc(sizeof *pt);
 	pt->root = NULL;
@@ -258,358 +263,232 @@ struct PieceTable *btree_new(void)
 	return pt;
 }
 
-void btree_free(struct PieceTable *pt)
+void pt_free(struct PieceTable *pt)
 {
-	// TODO
+	// TODO just do iteratively
 	free(pt);
 }
 
-void *btree_lookup(struct PieceTable *pt, unsigned long key)
-{
-	unsigned height = pt->height;
-	struct inner *node = pt->root;
-
-	if(height == 0)
-		return NULL;
-
-	for(unsigned i; height > 1; height--) {
-		for(i = 0; i < B; i++)
-			if(key >= bkey(height, node, i))
-				break;
-		if(i == B)
-			return NULL;
-		node = bval(height, node, i);
-		if(!node)
-			return NULL;
-	}
-
-	if(!node)
-		return NULL;
-
-	for(unsigned i = 0; i < BL; i++)
-		if(key == bkey(1, node, i))
-			return bval(1, node, i);
-	return NULL;
-}
-
-#if 0
-/*
- * Usually this function is quite similar to normal lookup.  But the key of
- * a parent node may be smaller than the smallest key of all its siblings.
- * In such a case we cannot just return NULL, as we have only proven that no
- * key smaller than key, but larger than this parent key exists.
- * So we set key to the parent key and retry.  We have to use the smallest
- * such parent key, which is the last parent key we encountered.
- */
-void *btree_get_prev(struct PieceTable *pt, unsigned long *key)
-{
-	unsigned i, height;
-	struct inner *node, *oldnode;
-	unsigned long retry_key = 0, fkey;
-
-	if(key == 0)
-		return NULL;
-	if(pt->height == 0)
-		return NULL;
-	fkey = *key;
-retry:
-	(*key)--;
-	node = pt->root;
-	for(height = pt->height; height > 1; height--) {
-		for(i = 0; i < B; i++)
-			if(fkey >= bkey(height, node, i))
-				break;
-		if(i == B)
-			goto miss;
-		oldnode = node;
-		node = bval(height, node, i);
-		if(!node)
-			goto miss;
-		retry_key = bkey(height, oldnode, i);
-	}
-
-	if(!node)
-		goto miss;
-
-	for(i = 0; i < BL; i++) {
-		if(*key > bkey(1, node, i)) {
-			if(bval(1, node, i)) {
-				// the previous key is returned in key
-				*key = bkey(1, node, i);
-				return bval(1, node, i);
-			} else
-				goto miss;
-		}
-	}
-miss:
-	if(retry_key) {
-		fkey = retry_key;
-		retry_key = 0;
-		goto retry;
-	}
-	return NULL;
-}
-#endif
-
 // returns index of the first key spanning the search key
-// the key is the smallest value of the corresponding span (kprev,k]
-static unsigned getpos(unsigned level, struct inner *node, unsigned long key)
+// key contains the offset at the end
+static unsigned getpos(struct inner *node, unsigned long *key)
 {
-	unsigned i;
-	for(i = 0; i < (level == 1 ? BL : B); i++)
-		if(key >= bkey(level, node, i))
-			break;
+	unsigned i = 0;
+	while(*key && *key >= node->spans[i]) {
+		*key -= node->spans[i];
+		i++;
+#ifndef NDEBUG
+		if(i == B)
+			assert(!*key); // off end is permitted, terminates loop
+#endif
+	}
+	return i;
+}
+
+static unsigned getleafpos(struct leaf *leaf, unsigned long *key)
+{
+	unsigned i = 0;
+	while(*key && *key >= leaf->spans[i]) {
+		*key -= leaf->spans[i];
+		i++;
+#ifndef NDEBUG
+		if(i == BL)
+			assert(!*key); // off end is permitted, terminates loop
+#endif
+	}
 	return i;
 }
 
 // count the number of live entries starting from START as an optimization
-static unsigned getfill(unsigned level, struct inner *node, int start)
+static unsigned getfill(struct inner *node, unsigned start)
 {
 	unsigned i;
-	for(i = start; i < (level == 1 ? BL : B); i++)
-		if(!bval(level, node, i))
+	for(i = start; i < B; i++)
+		if(!node->children[i])
 			break;
 	return i;
 }
 
-static struct inner *find_level(struct PieceTable *pt, unsigned long key,
-				unsigned level)
+static unsigned getleaffill(struct leaf *leaf, unsigned start)
 {
-	struct inner *node = pt->root;
 	unsigned i;
-
-	pt_dbg("finding level: %u for key %lu, height %u\n", level, key,
-	       pt->height);
-	// level >= 1, when level = 1, returned node is a leaf
-	for(unsigned height = pt->height; height > level; height--) {
-		assert(height > 1);
-		for(i = 0; i < B; i++)
-			if(key >= bkey(height, node, i))
-				break;
-
-		if((i == B) || !bval(height, node, i)) {
-			/* right-most key is too large, update it */
-			/* FIXME: If the right-most key on higher levels is
-			 * always zero, this wouldn't be necessary. */
-			i--;
-			setkey(height, node, i, key);
-		}
-		node = bval(height, node, i);
-	}
-	assert(node);
-	return node;
+	for(i = start; i < BL; i++)
+		if(!LVAL(leaf, i))
+			break;
+	return i;
 }
 
 /* insertion */
 
-static int btree_grow(struct PieceTable *pt)
+// returns the new size of the subtree
+static unsigned long tree_insert_recurse(unsigned level, struct inner *root,
+					 struct piece *p, unsigned long span,
+					 unsigned long pos,
+					 struct inner **split,
+					 unsigned long *splitsize)
 {
-	struct inner *node = btree_node_alloc(pt->height + 1);
-	if(pt->root) {
-		int fill = getfill(pt->height, pt->root, 0);
-		setkey(pt->height + 1, node, 0,
-		       bkey(pt->height, pt->root, fill - 1));
-		setval(pt->height + 1, node, 0, pt->root);
+	// base case: leaf insertion
+	if(level == 1) {
+		struct leaf *leaf = (struct leaf *)root;
+		unsigned i = getleafpos(leaf, &pos);
+		assert(pos == 0);
+		unsigned fill = getleaffill(leaf, i);
+		pt_dbg("found pos %u, leaf fill %u\n", i, fill);
+		if(fill < BL) {
+			pt_dbg("moving %u pieces originally at %u\n", fill - i,
+			       i);
+			print_node(level, root);
+			memmove(LKEYS(leaf) + i + 1, LKEYS(leaf) + i,
+				(fill - i) * sizeof(long));
+			leaf->spans[i] = span;
+			memmove(LVALS(leaf) + i + 1, LVALS(leaf) + i,
+				(fill - i) * sizeof(struct piece));
+			leaf->pieces[i] = *p;
+			return span;
+		} else { // fill == BL
+			struct leaf *right = leaf_alloc();
+			unsigned splitpos = BL / 2;
+			unsigned long newsize;
+			// 12|34 shift 34 if i <= 2 (splitpos)
+			// 12|345 shift 345 if i <= 2 (splitpos)
+			if(i <= splitpos) {
+				memcpy(LKEYS(right), LKEYS(leaf) + splitpos,
+				       (BL - splitpos) * sizeof(long));
+				memcpy(LVALS(right), LVALS(leaf) + splitpos,
+				       (BL - splitpos) * sizeof(struct piece));
+				leaf_clrslots(leaf, splitpos, BL);
+				print_node(1, root);
+				// now insert span in the old node
+				memmove(LKEYS(leaf) + i + 1, LKEYS(leaf) + i,
+					(splitpos - i) * sizeof(long));
+				leaf->spans[i] = span;
+				memmove(LVALS(leaf) + i + 1, LVALS(leaf) + i,
+					(splitpos - i) * sizeof(struct piece));
+				leaf->pieces[i] = *p;
+			} else { // i > splitpos, we don't touch first B/2+1 LEAF slots
+				// move to right split
+				memcpy(LKEYS(right), LKEYS(leaf) + splitpos + 1,
+				       (BL - (splitpos + 1)) * sizeof(long));
+				memcpy(LVALS(right), LVALS(leaf) + splitpos + 1,
+				       (BL - (splitpos + 1)) *
+					       sizeof(struct piece));
+				leaf_clrslots(leaf, splitpos + 1, BL);
+				// do insertion in right split
+				i -= splitpos + 1;
+				memmove(LKEYS(right) + i + 1, LKEYS(right) + i,
+					i * sizeof(long));
+				right->spans[i] = span;
+				memmove(LVALS(right) + i + 1, LVALS(right) + i,
+					i * sizeof(struct piece));
+				right->pieces[i] = *p;
+			}
+			newsize = spansum(1, (struct inner *)leaf,
+					  splitpos + 1);
+			*split = (struct inner *)right;
+			*splitsize = spansum(1, (struct inner *)right,
+					     BL - splitpos);
+			pt_dbg("new size of leaf: %lu\n", newsize);
+			pt_dbg("size of right split: %lu\n", *splitsize);
+			pt_dbg("split leaf: ");
+			print_node(level, (struct inner *)leaf);
+			pt_dbg("right: ");
+			print_node(level, (struct inner *)right);
+			return newsize;
+		}
+	} else { // level > 1: inner node recursion
+		unsigned i = getpos(root, &pos);
+		// newsize is the size delta when no split or
+		// the actual size of the original when there was a split
+		unsigned long newsize = tree_insert_recurse(
+			level - 1, root->children[i], p, span, pos, split, splitsize);
+		if(*split) {
+			pt_dbg("inner split node: ");
+			print_node(level, *split);
+			assert(false);
+		} else  {
+			root->spans[i] += newsize;
+			return newsize;
+		}
 	}
-	pt->root = node;
-	pt->height++;
-	return 0;
 }
 
-static void btree_insert_level(struct PieceTable *pt, unsigned long key,
-			       void *val, unsigned level)
+static void insert_piece(PieceTable *pt, struct piece *p, unsigned long span,
+			 unsigned long pos)
 {
-	struct inner *node;
-	unsigned i, pos, fill;
-
-	if(pt->height < level) {
-		btree_grow(pt);
-		pt_dbg("expanding for insertng %lu\n", key);
-		//pt_to_dot(pt, "p.dot");
+	if(!pt->root) {
+		pt_dbg("allocating empty root\n");
+		pt->root = (struct inner *)leaf_alloc();
+		pt->height = 1;
+		assert(0 == getleaffill((struct leaf *)pt->root, 0));
 	}
-
-retry:
-	node = find_level(pt, key, level);
-	pos = getpos(level, node, key);
-	fill = getfill(level, node, pos);
-	pt_dbg("fill: %u at level: %u\n", fill, level);
-	/* check for node split */
-	if(fill == (level == 1 ? BL : B)) {
-		struct inner *new = btree_node_alloc(level);
-		btree_insert_level(pt, bkey(level, node, fill / 2 - 1), new,
-				   level + 1);
-		// copy first half to new, shift latter half down
-		for(i = 0; i < fill / 2; i++) {
-			setkey(level, new, i, bkey(level, node, i));
-			setval(level, new, i, bval(level, node, i));
-			setkey(level, node, i, bkey(level, node, i + fill / 2));
-			setval(level, node, i, bval(level, node, i + fill / 2));
-			clearpair(level, node, i + fill / 2);
-		}
-		// copy final odd entry
-		if(fill & 1) {
-			setkey(level, node, i, bkey(level, node, fill - 1));
-			setval(level, node, i, bval(level, node, fill - 1));
-			clearpair(level, node, fill - 1);
-		}
-		goto retry;
+	struct inner *split = NULL;
+	unsigned long splitsize;
+	unsigned long newsize = tree_insert_recurse(
+		pt->height, pt->root, p, span, pos, &split, &splitsize);
+	// root split
+	if(split) {
+		pt_dbg("allocating new root\n");
+		struct inner *newroot = inner_alloc();
+		newroot->spans[0] = newsize;
+		newroot->children[0] = pt->root;
+		newroot->spans[1] = splitsize;
+		newroot->children[1] = split;
+		pt->root = newroot;
+		pt->height++;
 	}
-	assert(fill < (level == 1 ? BL : B));
-	/* shift and insert */
-	for(i = fill; i > pos; i--) {
-		setkey(level, node, i, bkey(level, node, i - 1));
-		setval(level, node, i, bval(level, node, i - 1));
-	}
-	setkey(level, node, pos, key);
-	setval(level, node, pos, val);
 }
 
-void btree_insert(struct PieceTable *pt, unsigned long key, void *val)
+long pt_size(PieceTable *pt)
 {
-	assert(val); // required since we null empty entries instead of storing sizes
-	btree_insert_level(pt, key, val, 1);
+	struct inner *root = pt->root;
+	if(pt->height == 1) {
+		return spansum(1, root, getleaffill((struct leaf *)root, 0));
+	} else
+		return spansum(pt->height, root, getfill(root, 0));
 }
 
 /* deletion */
 
-static void btree_shrink(struct PieceTable *pt)
-{
-	if(pt->height <= 1)
-		return;
-	struct inner *node = pt->root;
-	int fill = getfill(pt->height, node, 0);
-	assert(fill <= 1);
-	pt->root = bval(pt->height, node, 0);
-	pt->height--;
-	free(node);
-}
-
-static void *btree_remove_level(struct PieceTable *pt, unsigned long key,
-				unsigned level);
-
-static void merge(struct PieceTable *pt, unsigned level, struct inner *left,
-		  unsigned lfill, struct inner *right, unsigned rfill,
-		  struct inner *parent, int lpos)
-{
-	for(unsigned i = 0; i < rfill; i++) {
-		/* Move all keys to the left */
-		setkey(level, left, lfill + i, bkey(level, right, i));
-		setval(level, left, lfill + i, bval(level, right, i));
-	}
-	/* Exchange left and right child in parent */
-	setval(level + 1, parent, lpos, right);
-	setval(level + 1, parent, lpos + 1, left);
-	/* Remove left (formerly right) child from parent */
-	btree_remove_level(pt, bkey(level + 1, parent, lpos), level + 1);
-	free(right);
-}
-
-static void rebalance(struct PieceTable *pt, unsigned long key, unsigned level,
-		      struct inner *child, int fill)
-{
-	if(fill == 0) {
-		/* 
-		 * Because we don't steal entries from a neighbour, this case
-		 * can happen.  Parent node contains a single child, this
-		 * node, so merging with a sibling never happens.
-		 */
-		btree_remove_level(pt, key, level + 1);
-		free(child);
-		return;
-	}
-	struct inner *parent = find_level(pt, key, level + 1);
-	unsigned i = getpos(level + 1, parent, key);
-	assert(bval(level + 1, parent, i) == child);
-
-	if(i > 0) {
-		struct inner *left = bval(level + 1, parent, i - 1);
-		unsigned no_left = getfill(level, left, 0);
-		if(fill + no_left <= B) {
-			merge(pt, level, left, no_left, child, fill, parent,
-			      i - 1);
-			return;
-		}
-	}
-	if(i + 1 < getfill(level + 1, parent, i)) {
-		struct inner *right = bval(level + 1, parent, i + 1);
-		unsigned no_right = getfill(level, right, 0);
-		if(fill + no_right <= B) {
-			merge(pt, level, child, fill, right, no_right, parent,
-			      i);
-			return;
-		}
-	}
-	/*
-	 * We could also try to steal one entry from the left or right
-	 * neighbor.  By not doing so we changed the invariant from
-	 * "all nodes are at least half full" to "no two neighboring
-	 * nodes can be merged".  Which means that the average fill of
-	 * all nodes is still half or better.
-	 */
-}
-
-static void *btree_remove_level(struct PieceTable *pt, unsigned long key,
-				unsigned level)
-{
-	if(level > pt->height) {
-		/* we recursed all the way up */
-		pt->height = 0;
-		pt->root = NULL;
-		return NULL;
-	}
-	struct inner *node = find_level(pt, key, level);
-	unsigned pos = getpos(level, node, key);
-	unsigned fill = getfill(level, node, pos);
-	if((level == 1) && (bkey(level, node, pos) != key))
-		return NULL;
-	void *ret = bval(level, node, pos);
-	/* remove and shift */
-	for(unsigned i = pos; i < fill - 1; i++) {
-		setkey(level, node, i, bkey(level, node, i + 1));
-		setval(level, node, i, bval(level, node, i + 1));
-	}
-	clearpair(level, node, fill - 1);
-
-	if(fill - 1 < B / 2) {
-		if(level < pt->height)
-			rebalance(pt, key, level, node, fill - 1);
-		else if(fill - 1 == 1)
-			btree_shrink(pt);
-	}
-
-	return ret;
-}
-
-void *btree_remove(struct PieceTable *pt, unsigned long key)
-{
-	if(pt->height == 0)
-		return NULL;
-
-	return btree_remove_level(pt, key, 1);
-}
-
 int main(void)
 {
 	pt_print_struct_sizes();
-	struct PieceTable *pt = btree_new();
-	struct piece p = (struct piece){ .len = 1 };
-	/*
-	btree_insert(pt, 42, &p);
-	p.len++;
-	btree_insert(pt, 12, &p);
-	p.len++;
-	btree_insert(pt, 21, &p);
-	p.len++;
-	btree_insert(pt, 24, &p);
-	p.len++;
-	btree_insert(pt, 1, &p);
-	p.len++;
-	btree_insert(pt, 36, &p);
-	*/
-	for(int i = 0; i < 100; i += 2) {
-		btree_insert(pt, i, &p);
-		btree_insert(pt, i+1, &p);
-	}
+	struct PieceTable *pt = pt_new();
+	struct piece p = (struct piece){ .offset = 1 };
+	insert_piece(pt, &p, 5, 0);
+	p.offset = 2;
+	insert_piece(pt, &p, 69, 5);
+	p.offset = 3;
+	insert_piece(pt, &p, 42, 0);
+	p.offset = 4;
+	insert_piece(pt, &p, 21, 47);
+	p.offset = 5;
+	insert_piece(pt, &p, 3, 0);
+	p.offset = 6;
+	insert_piece(pt, &p, 7, 140);
+	//p.offset = 7;
+	//insert_piece(pt, &p, 1, 7);
+
 	pt_to_dot(pt, "t.dot");
+	pt_dbg("piece table size: %ld\n", pt_size(pt));
+	/*
+	pt_insert(pt, 1, &p);
+	p.len++;
+	pt_insert(pt, 2, &p);
+	p.len++;
+	pt_insert(pt, 3, &p);
+	p.len++;
+	pt_insert(pt, 5, &p);
+	p.len++;
+	pt_insert(pt, 6, &p);
+	p.len++;
+	pt_insert(pt, 5, &p);
+	pt_to_dot(pt, "t.dot");
+	*/
+	/*
+	for(int i = 0; i < 100000; i += 2) {
+		pt_insert(pt, i, &p);
+		pt_insert(pt, i + 1, &p);
+	}
+	*/
 	//printf("bytes[0]: %ld\n", pt->root->children[0]->children[0]->bytes[0]);
 }

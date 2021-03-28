@@ -22,7 +22,7 @@ long pt_pieces_moved = 0;
 #define LOW_WATER 256
 #define HIGH_WATER 4096
 
-enum blktype { IMMUT, IMMUT_MMAP, HEAP };
+enum blktype { IMMUT, IMMUT_MMAP, MUT };
 
 struct block {
 	enum blktype type;
@@ -122,14 +122,17 @@ static struct block *new_block(const char *data, long len)
 		new->type = IMMUT;
 		new->refs = 1;
 	} else
-		new->type = HEAP;
+		new->type = MUT;
 	return new;
 }
 
 static void free_block(struct block *block)
 {
 	switch(block->type) {
-	case HEAP: free(block->data); free(block); break;
+	case MUT:
+		free(block->data);
+		free(block);
+		break;
 	case IMMUT_MMAP:
 		if(--block->refs == 0) {
 			munmap(block->data, block->size);
@@ -147,7 +150,7 @@ static void free_block(struct block *block)
 static void block_insert(struct block *block, long offset, const char *data,
 			 long len)
 {
-	assert(block->type == HEAP);
+	assert(block->type == MUT);
 	char *start = block->data + offset;
 	memmove(start + len, start, block->size - offset);
 	memcpy(block->data + offset, data, len);
@@ -160,7 +163,7 @@ static void block_insert(struct block *block, long offset, const char *data,
 
 static void block_delete(struct block *block, long offset, long len)
 {
-	assert(block->type == HEAP);
+	assert(block->type == MUT);
 	char *start = block->data + offset;
 	memmove(start, start + len, block->size - offset - len);
 	block->size -= len;
@@ -273,7 +276,7 @@ void pt_insert(PieceTable *pt, long pos, char *data, long len)
 	if(len == 0)
 		return;
 	struct piece *old = pt_search(pt, pos, &pos);
-	if(old->block->type == HEAP)
+	if(old->block->type == MUT)
 		piece_insert(old, pos, data, len);
 	else if(pos == old->bytes) {
 		long index = old - pt->vec + 1;
@@ -320,7 +323,7 @@ void pt_erase(PieceTable *pt, long pos, long len)
 	pt->bytes -= len;
 	struct piece *piece = pt_search(pt, pos, &pos);
 	if(len < piece->bytes - pos) {
-		if(piece->block->type == HEAP)
+		if(piece->block->type == MUT)
 			piece_delete(piece, pos, len);
 		else {
 			struct piece new_right = {
@@ -362,7 +365,7 @@ void pt_erase(PieceTable *pt, long pos, long len)
 			free_block(piece->block);
 		} else { // len = 0 from above is ok
 			end = piece;
-			if(piece->block->type == HEAP)
+			if(piece->block->type == MUT)
 				piece_delete(piece, 0, len);
 			else {
 				piece->offset += len;
