@@ -1,5 +1,5 @@
 /*
- * simple array layout. No merging optimization
+ * simple array layout. TODO merging optimization
  */
 
 #include <assert.h>
@@ -12,106 +12,103 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
-#include "pt.h"
+#include "st.h"
 
-long pt_pieces_moved = 0;
+size_t st_slices_moved = 0;
 
-// TODO what are optimal values?
-// pieces below LOW_WATER should be merged
-// pieces above HIGH_WATER must be immutable
-#define LOW_WATER 256
-#define HIGH_WATER 4096
+// slices >= HIGH_WATER must be immutable
+#define HIGH_WATER 2048
 
-enum blktype { IMMUT, IMMUT_MMAP, MUT };
+enum blktype { LARGE, LARGE_MMAP, SMALL };
 
 struct block {
 	enum blktype type;
-	int refs; // only for IMMUT blocks
+	int refs; // only for LARGE blocks
 	char *data;
-	long size;
+	size_t size;
 };
 
-struct piece {
+struct slice {
 	struct block *block; // data block
-	long offset; // offset into block
-	long bytes; // length
+	size_t offset; // offset into block
+	size_t bytes; // length
 };
 
-struct PieceTable {
-	long bytes; // byte count
-	long size, capacity; // no. of pieces in array
-	struct piece *vec; // an array of pieces
+struct slicetable {
+	size_t bytes; // byte count
+	size_t size, capacity; // no. of slices in array
+	struct slice *vec; // an array of slices
 };
 
 /* simple */
 
-long pt_size(PieceTable *pt)
+size_t st_size(SliceTable *st)
 {
-	return pt->bytes;
+	return st->bytes;
 }
 
-static long count_lfs(struct piece *piece)
+static size_t count_lfs(struct slice *slice)
 {
-	long count = 0;
-	for(long i = piece->offset; i < piece->offset + piece->bytes; i++)
-		if(piece->block->data[i] == '\n')
+	size_t count = 0;
+	for(size_t i = slice->offset; i < slice->offset + slice->bytes; i++)
+		if(slice->block->data[i] == '\n')
 			count++;
 	return count;
 }
 
-long pt_lfs(PieceTable *pt)
+size_t st_lfs(SliceTable *st)
 {
-	long lfs = 0;
-	for(long i = 0; i < pt->size; i++)
-		lfs += count_lfs(&pt->vec[i]);
+	size_t lfs = 0;
+	for(size_t i = 0; i < st->size; i++)
+		lfs += count_lfs(&st->vec[i]);
 	return lfs;
 }
 
-static void pt_pprint_piece(struct piece *piece)
+static void st_pprint_slice(struct slice *slice)
 {
-	fprintf(stderr, "┃piece with %7ld bytes ┃ %7ld lfs ┃ data: %5.*s...┃\n",
-		piece->bytes, count_lfs(piece), (int)MIN(5, piece->bytes),
-		piece->block->data + piece->offset);
+	fprintf(stderr, "┃slice with %7ld bytes ┃ %7ld lfs ┃ data: %5.*s...┃\n",
+		slice->bytes, count_lfs(slice), (int)MIN(5, slice->bytes),
+		slice->block->data + slice->offset);
 }
 
-void pt_pprint(PieceTable *pt)
+void st_pprint(SliceTable *st)
 {
-	fprintf(stderr, "PieceTable with %ld/%ld pieces, %ld bytes\n", pt->size,
-		pt->capacity, pt_size(pt));
+	fprintf(stderr, "PieceTable with %ld/%ld slices, %ld bytes\n", st->size,
+		st->capacity, st_size(st));
 	fputs("┏━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓\n",
 	      stderr);
 
-	for(long i = 0; i < pt->size; i++)
-		pt_pprint_piece(&pt->vec[i]);
+	for(size_t i = 0; i < st->size; i++)
+		st_pprint_slice(&st->vec[i]);
 
 	fputs("┗━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━┛\n",
 	      stderr);
 }
 
-//void check(PieceTable *pt, int val)
-//{
-//	long len = 0;
-//	for(long i = 0; i < pt->size; i++)
-//		len += pt->vec[i].bytes;
-//	if(len != pt->bytes) {
-//		pt_pprint(pt);
-//		pt_dbg("val %d", val);
-//		assert(false);
-//	}
-//}
+bool st_check_invariants(SliceTable *st)
+{
+	size_t len = 0;
+	for(size_t i = 0; i < st->size; i++)
+		len += st->vec[i].bytes;
+	if(len != st->bytes) {
+		st_pprint(st);
+		return false;
+	} else
+		return true;
+}
 
-void pt_print_struct_sizes(void)
+void st_print_struct_sizes(void)
 {
 	fprintf(stderr,
 		"Implementation: \e[38;5;1marray\e[0m\n"
-		"sizeof(struct piece): %zd\n"
+		"sizeof(struct slice): %zd\n"
 		"sizeof(PieceTable): %zd\n",
-		sizeof(struct piece), sizeof(PieceTable));
+		sizeof(struct slice), sizeof(SliceTable));
 }
 
 /* the fun stuff */
 
-static struct block *new_block(const char *data, long len)
+static struct block *new_block(const char *data, size_t len)
 {
 	struct block *new = malloc(sizeof *new);
 	new->size = len;
@@ -119,27 +116,27 @@ static struct block *new_block(const char *data, long len)
 	memcpy(new->data, data, len);
 
 	if(len > HIGH_WATER) {
-		new->type = IMMUT;
+		new->type = LARGE;
 		new->refs = 1;
 	} else
-		new->type = MUT;
+		new->type = SMALL;
 	return new;
 }
 
 static void free_block(struct block *block)
 {
 	switch(block->type) {
-	case MUT:
+	case SMALL:
 		free(block->data);
 		free(block);
 		break;
-	case IMMUT_MMAP:
+	case LARGE_MMAP:
 		if(--block->refs == 0) {
 			munmap(block->data, block->size);
 			free(block);
 		}
 		break;
-	case IMMUT:
+	case LARGE:
 		if(--block->refs == 0) {
 			free(block->data);
 			free(block);
@@ -147,292 +144,322 @@ static void free_block(struct block *block)
 	}
 }
 
-static void block_insert(struct block *block, long offset, const char *data,
-			 long len)
+static void block_insert(struct block *block, size_t offset, const char *data,
+			 size_t len)
 {
-	assert(block->type == MUT);
+	assert(block->type == SMALL);
+	if(block->size + len > HIGH_WATER)
+		block->data = realloc(block->data, block->size + len);
 	char *start = block->data + offset;
 	memmove(start + len, start, block->size - offset);
 	memcpy(block->data + offset, data, len);
 	block->size += len;
 	if(block->size > HIGH_WATER) {
-		block->type = IMMUT;
+		block->type = LARGE;
 		block->refs = 1;
 	}
 }
 
-static void block_delete(struct block *block, long offset, long len)
+static void block_delete(struct block *block, size_t offset, size_t len)
 {
-	assert(block->type == MUT);
+	assert(block->type == SMALL);
 	char *start = block->data + offset;
 	memmove(start, start + len, block->size - offset - len);
 	block->size -= len;
 }
 
-PieceTable *pt_new(void)
+SliceTable *st_new(void)
 {
-	PieceTable *pt = malloc(sizeof *pt);
-	pt->vec = malloc(sizeof(struct piece));
-	pt->size = pt->capacity = 1;
-	pt->bytes = 0;
+	SliceTable *st = malloc(sizeof *st);
+	st->vec = malloc(sizeof(struct slice));
+	st->size = st->capacity = 1;
+	st->bytes = 0;
+
 	struct block *init = malloc(sizeof(struct block));
-	*init = (struct block){ .type = IMMUT, .refs = 1 };
-	pt->vec[0] = (struct piece){ .bytes = 0, .block = init };
-	return pt;
+	*init = (struct block){ .type = LARGE, .refs = 1 };
+	st->vec[0] = (struct slice){ .bytes = 0, .block = init };
+	return st;
 }
 
-PieceTable *pt_new_from_file(const char *path, long len, long off)
+SliceTable *st_new_from_file(const char *path)
 {
 	int fd = open(path, O_RDONLY);
 	if(!fd)
 		return NULL;
-	len = len ? len : lseek(fd, off, SEEK_END);
+	size_t len = lseek(fd, 0, SEEK_END);
 	if(!len)
-		return pt_new(); // mmap cannot handle 0-length mappings
-	void *data = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, off);
-	close(fd);
-	if(data == MAP_FAILED)
-		return NULL;
+		return st_new(); // mmap cannot handle 0-length mappings
 
-	PieceTable *pt = malloc(sizeof *pt);
-	pt->vec = malloc(2 * sizeof(struct piece));
-	pt->size = pt->capacity = 2;
-	pt->bytes = len;
+	enum blktype type;
+	void *data;
+	if(len <= HIGH_WATER) {
+		data = malloc(HIGH_WATER);
+		if(read(fd, data, len) != len) {
+			free(data);
+			return NULL;
+		}
+		type = SMALL;
+	} else {
+		data = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0);
+		close(fd);
+		if(data == MAP_FAILED)
+			return NULL;
+		type = LARGE_MMAP;
+	}
+
+	SliceTable *st = malloc(sizeof *st);
+	st->vec = malloc(2 * sizeof(struct slice));
+	st->size = st->capacity = 2;
+	st->bytes = len;
+	// ensures we do not ever try mutating the sentinel block
+	struct block *dummy = malloc(sizeof(struct block));
+	*dummy = (struct block){ .type = LARGE, .refs = 1 };
+	st->vec[0] = (struct slice){ .bytes = 0, .block = dummy };
+
 	struct block *init = malloc(sizeof(struct block));
-	*init = (struct block){
-		.type = IMMUT_MMAP,
-		.refs = 2,
-		.size = len,
-		.data = data,
-	};
-	pt->vec[0] = (struct piece){ .bytes = 0, .block = init };
-	pt->vec[1] = (struct piece){
-		.bytes = len,
-		.offset = 0,
-		.block = init,
-	};
-	return pt;
+	*init = (struct block){ type, .refs = 1, data, len, };
+	st->vec[1] = (struct slice){ .bytes = len, .offset = 0, .block = init };
+	return st;
 }
 
-void pt_free(PieceTable *pt)
+void st_free(SliceTable *st)
 {
-	for(long i = 0; i < pt->size; i++)
-		free_block(pt->vec[i].block);
-	free(pt->vec);
-	free(pt);
+	for(size_t i = 0; i < st->size; i++)
+		free_block(st->vec[i].block);
+	free(st->vec);
+	free(st);
 }
 
-struct piece *pt_search(PieceTable *pt, long pos, long *off)
+// TODO handle files properly
+bool st_dump(SliceTable *st, const char *path)
 {
-	struct piece *piece = pt->vec;
-	while(pos > piece->bytes) {
-		pos -= piece->bytes;
-		piece++;
+	FILE *file = fopen(path, "w");
+	if(!file)
+		return false;
+
+	for(size_t i = 1; i < st->size; i++) {
+		fprintf(file, "%.*s", (int)st->vec[i].bytes,
+				st->vec[i].block->data + st->vec[i].offset);
+	}
+	return true;
+}
+
+struct slice *st_search(SliceTable *st, size_t pos, size_t *off)
+{
+	struct slice *slice = st->vec;
+
+	while(pos > slice->bytes) {
+		pos -= slice->bytes;
+		slice++;
 	}
 	*off = pos;
-	assert(pos > 0 || piece == &pt->vec[0]);
-	assert(piece - pt->vec < pt->size);
-	return piece;
+	assert(pos > 0 || slice == &st->vec[0]);
+	assert((size_t)(slice - st->vec) < st->size);
+	return slice;
 }
 
-static void maybe_expand_vec(PieceTable *pt)
+static void maybe_expand_vec(SliceTable *st)
 {
-	if(pt->size > pt->capacity) {
-		pt->capacity = MAX(pt->capacity * 2, pt->size);
-		pt->vec = realloc(pt->vec, pt->capacity * sizeof(struct piece));
+	if(st->size > st->capacity) {
+		st->capacity = MAX(st->capacity * 2, st->size);
+		st->vec = realloc(st->vec, st->capacity * sizeof(struct slice));
 	}
 }
 
-static void maybe_shrink_vec(PieceTable *pt)
+static void maybe_shrink_vec(SliceTable *st)
 {
-	if(pt->size < pt->capacity / 2) {
-		pt->capacity /= 2;
-		pt->vec = realloc(pt->vec, pt->capacity * sizeof(struct piece));
+	if(st->size < st->capacity / 2) {
+		st->capacity /= 2;
+		st->vec = realloc(st->vec, st->capacity * sizeof(struct slice));
 	}
 }
 
-static struct piece new_piece(char *data, long len)
+static struct slice new_slice(char *data, size_t len)
 {
 	struct block *block = new_block(data, len);
-	struct piece new =
-		(struct piece){ .block = block, .offset = 0, .bytes = len };
-	return new;
+	struct slice p = (struct slice){ .block = block, .offset = 0, .bytes = len };
+	return p;
 }
 
-static void piece_insert(struct piece *piece, long off, char *data, long len)
+static void slice_insert(struct slice *slice, size_t off, char *data, size_t len)
 {
-	block_insert(piece->block, piece->offset + off, data, len);
-	piece->bytes += len;
+	block_insert(slice->block, slice->offset + off, data, len);
+	slice->bytes += len;
 }
 
-static void piece_delete(struct piece *piece, long off, long len)
+static void slice_delete(struct slice *slice, size_t off, size_t len)
 {
-	block_delete(piece->block, off, len);
-	piece->bytes -= len;
+	block_delete(slice->block, off, len);
+	slice->bytes -= len;
 }
 
-void pt_insert(PieceTable *pt, long pos, char *data, long len)
+void st_insert(SliceTable *st, size_t pos, char *data, size_t len)
 {
 	if(len == 0)
 		return;
-	struct piece *old = pt_search(pt, pos, &pos);
-	if(old->block->type == MUT)
-		piece_insert(old, pos, data, len);
-	else if(pos == old->bytes) {
-		long index = old - pt->vec + 1;
-		long count = pt->size - index;
-		pt->size++;
-		maybe_expand_vec(pt);
-		struct piece *start = &pt->vec[index];
-		memmove(start + 1, start, count * sizeof(struct piece));
-		pt_pieces_moved += count;
 
-		*start = new_piece(data, len);
+	struct slice *old = st_search(st, pos, &pos);
+
+	if(old->block->type == SMALL)
+		slice_insert(old, pos, data, len);
+	else if(pos == old->bytes) {
+		size_t index = old - st->vec + 1;
+		size_t count = st->size - index;
+		struct slice *start;
+
+		st->size++;
+		maybe_expand_vec(st);
+		start = &st->vec[index];
+		memmove(start + 1, start, count * sizeof(struct slice));
+		st_slices_moved += count;
+		*start = new_slice(data, len);
 	} else {
-		struct piece new_left = {
+		struct slice new_left = {
 			.block = old->block,
 			.bytes = pos,
 			.offset = old->offset,
 		};
-		struct piece new_right = {
+		struct slice new_right = {
 			.block = old->block,
 			.bytes = old->bytes - pos,
 			.offset = old->offset + pos,
 		};
-		if(old->block->type == IMMUT || old->block->type == IMMUT_MMAP)
+		if(old->block->type == LARGE || old->block->type == LARGE_MMAP)
 			old->block->refs++;
-		long index = old - pt->vec + 1;
-		long count = pt->size - index;
-		pt->size += 2;
-		maybe_expand_vec(pt);
-		struct piece *start = &pt->vec[index];
-		memmove(start + 2, start, count * sizeof(struct piece));
-		pt_pieces_moved += count;
+
+		size_t index = old - st->vec + 1;
+		size_t count = st->size - index;
+		struct slice *start;
+
+		st->size += 2;
+		maybe_expand_vec(st);
+		start = &st->vec[index];
+		memmove(start + 2, start, count * sizeof(struct slice));
+		st_slices_moved += count;
 		start[-1] = new_left;
-		start[0] = new_piece(data, len);
+		start[0] = new_slice(data, len);
 		start[1] = new_right;
 	}
-	pt->bytes += len;
+	st->bytes += len;
 }
 
-void pt_erase(PieceTable *pt, long pos, long len)
+void st_delete(SliceTable *st, size_t pos, size_t len)
 {
+	len = MIN(len, st_size(st) - pos);
 	if(len == 0)
 		return;
-	len = MIN(len, pt_size(pt) - pos);
-	pt->bytes -= len;
-	struct piece *piece = pt_search(pt, pos, &pos);
-	if(len < piece->bytes - pos) {
-		if(piece->block->type == MUT)
-			piece_delete(piece, pos, len);
-		else {
-			struct piece new_right = {
-				.block = piece->block,
-				.bytes = piece->bytes - pos - len,
-				.offset = piece->offset + pos + len
-			};
-			if(piece->block->type == IMMUT ||
-			   piece->block->type == IMMUT_MMAP)
-				piece->block->refs++;
-			piece->bytes = pos;
-			long index = piece + 1 - pt->vec;
-			long count = pt->vec + pt->size - (piece + 1);
-			pt->size++;
-			maybe_expand_vec(pt);
-			struct piece *start = &pt->vec[index];
-			memmove(start + 1, start, count * sizeof(struct piece));
-			pt_pieces_moved += count;
+	struct slice *slice = st_search(st, pos, &pos);
 
+	if(pos + len < slice->bytes) {
+		if(slice->block->type == SMALL)
+			slice_delete(slice, pos, len);
+		else {
+			struct slice new_right = {
+				.block = slice->block,
+				.bytes = slice->bytes - pos - len,
+				.offset = slice->offset + pos + len
+			};
+			slice->bytes = pos;
+			slice->block->refs++;
+
+			size_t index = slice + 1 - st->vec;
+			size_t count = st->vec + st->size - (slice + 1);
+			struct slice *start;
+
+			st->size++;
+			maybe_expand_vec(st);
+			start = &st->vec[index];
+			memmove(start + 1, start, count * sizeof(struct slice));
+			st_slices_moved += count;
 			*start = new_right;
 		}
 	} else {
-		struct piece *start, *end;
-		len -= piece->bytes - pos;
-		piece->bytes = pos;
+		struct slice *start, *end;
+
+		len -= slice->bytes - pos;
+		slice->bytes = pos;
+
 		if(len > 0) {
-			start = ++piece;
-			while(len > piece->bytes) {
-				free_block(piece->block);
-				len -= piece->bytes;
-				piece++;
+			start = ++slice;
+			while(len > slice->bytes) {
+				free_block(slice->block);
+				len -= slice->bytes;
+				slice++;
 			}
-		} else {
-			start = piece; // end boundary: start = end, don't look further
-		}
-		if(len == piece->bytes) {
-			end = piece + 1;
-			assert(piece->bytes > 0); // not sentinel
-			free_block(piece->block);
+		} else
+			start = slice; // end boundary: start = end, don't look further
+
+		if(len == slice->bytes) {
+			end = slice + 1;
+			assert(slice->bytes > 0); // not sentinel
+			free_block(slice->block);
 		} else { // len = 0 from above is ok
-			end = piece;
-			if(piece->block->type == MUT)
-				piece_delete(piece, 0, len);
+			end = slice;
+			if(slice->block->type == SMALL)
+				slice_delete(slice, 0, len);
 			else {
-				piece->offset += len;
-				piece->bytes -= len;
+				slice->offset += len;
+				slice->bytes -= len;
 			}
 		}
-		long count = pt->vec + pt->size - end;
-		memmove(start, end, count * sizeof(struct piece));
-		pt->size -= end - start;
-		maybe_shrink_vec(pt);
-		pt_pieces_moved += count;
+		size_t count = st->vec + st->size - end;
+		memmove(start, end, count * sizeof(struct slice));
+		st->size -= end - start;
+		maybe_shrink_vec(st);
+		st_slices_moved += count;
 	}
+	st->bytes -= len;
 }
 
 /* iterator */
 
-//PieceIterator *pt_iter_get
+//PieceIterator *st_iter_get
 
 /* dot output */
 
 #include "dot.h"
 
-#define FSTR(dest, str, ...)                                                   \
-	do {                                                                   \
-		int len = snprintf(NULL, 0, str, __VA_ARGS__);                 \
-		dest = realloc(dest, len + 1);                                 \
-		sprintf(dest, str, __VA_ARGS__);                               \
-	} while(0)
-
-static void pt_array_to_dot(PieceTable *pt, FILE *file)
+static void st_array_to_dot(SliceTable *st, FILE *file)
 {
-	graph_link(file, pt, "vec", pt->vec, "body");
-	graph_table_begin(file, pt->vec, "aquamarine3");
-	char *tmp = NULL;
-	char *port = NULL;
-	for(long i = 0; i < pt->size; i++) {
+	graph_link(file, st, "vec", st->vec, "body");
+	graph_table_begin(file, st->vec, "aquamarine3");
+	char *tmp = NULL, *port = NULL;
+
+	for(size_t i = 0; i < st->size; i++) {
 		FSTR(port, "%ld", i);
-		FSTR(tmp, "len: %ld", pt->vec[i].bytes);
+		FSTR(tmp, "len: %ld", st->vec[i].bytes);
 		graph_table_entry(file, tmp, port);
 	}
 	free(tmp);
 	free(port);
 	graph_table_end(file);
 	// output links
-	for(long i = 1; i < pt->size; i++) {
-		struct piece *p = &pt->vec[i];
+	for(size_t i = 1; i < st->size; i++) {
+		struct slice *p = &st->vec[i];
 		fprintf(file, "\n  x%ld:%ld -> \"%.*s\" [style=dashed];\n",
-			(long)pt->vec, i, MIN((int)p->bytes, 60),
+			(long)st->vec, i, MIN((int)p->bytes, 60),
 			p->block->data + p->offset);
 	}
 }
 
-bool pt_to_dot(PieceTable *pt, const char *path)
+bool st_to_dot(SliceTable *st, const char *path)
 {
+	char *tmp = NULL;
 	FILE *file = fopen(path, "w");
-	char *tmp = NULL; // realloc
 	if(!file)
 		goto fail;
 	graph_begin(file);
-	graph_table_begin(file, pt, NULL);
-	FSTR(tmp, "size: %ld", pt->size);
+
+	graph_table_begin(file, st, NULL);
+	FSTR(tmp, "size: %ld", st->size);
 	graph_table_entry(file, tmp, NULL);
-	FSTR(tmp, "capacity: %ld", pt->capacity);
+	FSTR(tmp, "capacity: %ld", st->capacity);
 	graph_table_entry(file, tmp, NULL);
 	graph_table_entry(file, "vec", "vec");
 	graph_table_end(file);
-	pt_array_to_dot(pt, file);
+
+	st_array_to_dot(st, file);
+
 	graph_end(file);
 	free(tmp);
 	if(fclose(file) < 0)
@@ -440,6 +467,6 @@ bool pt_to_dot(PieceTable *pt, const char *path)
 	return true;
 
 fail:
-	perror("pt_to_dot");
+	perror("st_to_dot");
 	return false;
 }

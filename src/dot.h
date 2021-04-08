@@ -1,6 +1,13 @@
 #pragma once
 #include <stdio.h>
 
+#define FSTR(dest, str, ...)                                                   \
+	do {                                                                   \
+		int len = snprintf(NULL, 0, str, __VA_ARGS__);                 \
+		dest = realloc(dest, len + 1);                                 \
+		sprintf(dest, str, __VA_ARGS__);                               \
+	} while(0)
+
 void graph_begin(FILE *file)
 {
 	fprintf(file,
@@ -38,7 +45,7 @@ void graph_table_entry(FILE *file, const char *s, const char *port)
 	fprintf(file, "    <td height=\"36\" width=\"25\" ");
 	if(port)
 		fprintf(file, "port= \"%s\"", port);
-	fprintf(file, ">%s</td>\n", s);
+	fprintf(file, ">%s</td>\n", s ? s : "");
 }
 
 void graph_table_end(FILE *file) {

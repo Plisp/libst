@@ -4,11 +4,11 @@ DFLAGS = -Wextra -g
 
 debug:
 	$(CC) array.c main.c -o array $(CFLAGS) $(DFLAGS)
-	#$(CC) btree.c main.c -o btree $(CFLAGS) $(DFLAGS)
+	$(CC) btree.c main.c -o btree $(CFLAGS) $(DFLAGS)
 
 opt:
 	$(CC) array.c main.c -o array -O3 $(CFLAGS) -DNDEBUG
-	#$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG
+	$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG
 
 dot:
 	gcc $(CFLAGS) $(DFLAGS) btree.c -o btree
