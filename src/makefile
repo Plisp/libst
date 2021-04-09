@@ -1,6 +1,6 @@
-CC = gcc
-CFLAGS = -Wall -Wno-parentheses -std=c11 -D_POSIX_C_SOURCE=199309
-DFLAGS = -Wextra -g
+CC = clang
+CFLAGS = -Wall -Wno-parentheses -std=c11
+DFLAGS = -Wextra -g -fsanitize=undefined -fsanitize=address
 
 debug:
 	$(CC) array.c main.c -o array $(CFLAGS) $(DFLAGS)
@@ -11,9 +11,9 @@ opt:
 	$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG
 
 dot:
-	gcc $(CFLAGS) $(DFLAGS) btree.c -o btree
+	$(CC) $(CFLAGS) $(DFLAGS) btree.c -o btree
 	./btree
-	dot -Tpng t.dot -o t.png
+	#dot -Tpng t.dot -o t.png
 	#./array
 	#dot -Tpng array.dot -o array.png
 	#./btree

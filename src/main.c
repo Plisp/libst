@@ -6,13 +6,12 @@
 int main(void)
 {
 //#ifndef NDEBUG
-#if 0
+#if 1
 	SliceTable *st;
 	st_print_struct_sizes();
 	st = st_new_from_file("vector.c");
 	st_pprint(st);
 	assert(st_size(st) == 9616);
-	/*
 	st_dbg("deletion: whole piece case\n");
 	st_delete(st, 0, 9616);
 	st_pprint(st);
@@ -29,37 +28,38 @@ int main(void)
 	st_free(st);
 	st_dbg("deletion: piece split case\n");
 	st = st_new_from_file("vector.c");
-	*/
 	st_delete(st, 1, 9614);
 	st_pprint(st);
 	st_to_dot(st, "t.dot");
 	st_free(st);
-	/*
 	st_dbg("deletion: multiple piece case general\n");
 	st = st_new_from_file("vector.c");
 	st_insert(st, 2, "XXX", 3);
 	st_delete(st, 1, 9616);
 	st_pprint(st);
+	st_dump(st, stderr);
 	st_free(st);
 	st_dbg("deletion: multiple piece case start boundary\n");
 	st = st_new_from_file("vector.c");
 	st_insert(st, 1, "XXX", 3);
 	st_delete(st, 1, 9616);
 	st_pprint(st);
+	st_dump(st, stderr);
 	st_free(st);
 	st_dbg("deletion: multiple piece case end boundary\n");
 	st = st_new_from_file("vector.c");
 	st_insert(st, 2, "XXX", 3);
 	st_delete(st, 1, 1000000);
 	st_pprint(st);
+	st_dump(st, stderr);
 	st_free(st);
 	st_dbg("deletion: multiple piece case start+end boundaries\n");
 	st = st_new_from_file("vector.c");
 	st_insert(st, 2, "XXX", 3);
 	st_delete(st, 0, 1000000);
 	st_pprint(st);
+	st_dump(st, stderr);
 	st_free(st);
-	*/
 #else
 	//struct timespec before, after;
 	//clock_gettime(CLOCK_REALTIME, &before);
@@ -74,8 +74,10 @@ int main(void)
 		//st_pprint(st);
 		assert(st_check_invariants(st));
 	}
+	st_free(st);
 	//clock_gettime(CLOCK_REALTIME, &after);
-	st_dump(st, "test");
+	FILE *test = fopen("test", "w");
+	//st_dump(st, test);
 	/*
 	printf("took: %f ms, final size: %ld\n",
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +

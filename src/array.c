@@ -68,7 +68,7 @@ static void st_pprint_slice(struct slice *slice)
 {
 	fprintf(stderr, "┃slice with %7ld bytes ┃ %7ld lfs ┃ data: %5.*s...┃\n",
 		slice->bytes, count_lfs(slice), (int)MIN(5, slice->bytes),
-		slice->block->data + slice->offset);
+		slice->block->data ? slice->block->data + slice->offset : NULL);
 }
 
 void st_pprint(SliceTable *st)
@@ -230,18 +230,12 @@ void st_free(SliceTable *st)
 	free(st);
 }
 
-// TODO handle files properly
-bool st_dump(SliceTable *st, const char *path)
+void st_dump(SliceTable *st, FILE *file)
 {
-	FILE *file = fopen(path, "w");
-	if(!file)
-		return false;
-
 	for(size_t i = 1; i < st->size; i++) {
 		fprintf(file, "%.*s", (int)st->vec[i].bytes,
 				st->vec[i].block->data + st->vec[i].offset);
 	}
-	return true;
 }
 
 struct slice *st_search(SliceTable *st, size_t pos, size_t *off)
@@ -348,6 +342,7 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 	len = MIN(len, st_size(st) - pos);
 	if(len == 0)
 		return;
+	st->bytes -= len;
 	struct slice *slice = st_search(st, pos, &pos);
 
 	if(pos + len < slice->bytes) {
@@ -381,7 +376,7 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 
 		if(len > 0) {
 			start = ++slice;
-			while(len > slice->bytes) {
+			while(len > 0 && len >= slice->bytes) {
 				free_block(slice->block);
 				len -= slice->bytes;
 				slice++;
@@ -389,12 +384,8 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 		} else
 			start = slice; // end boundary: start = end, don't look further
 
-		if(len == slice->bytes) {
-			end = slice + 1;
-			assert(slice->bytes > 0); // not sentinel
-			free_block(slice->block);
-		} else { // len = 0 from above is ok
-			end = slice;
+		end = slice;
+		if(len > 0) { // we could use another sentinel but that's a bit far
 			if(slice->block->type == SMALL)
 				slice_delete(slice, 0, len);
 			else {
@@ -408,7 +399,6 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 		maybe_shrink_vec(st);
 		st_slices_moved += count;
 	}
-	st->bytes -= len;
 }
 
 /* iterator */

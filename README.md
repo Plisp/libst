@@ -2,7 +2,8 @@
 A collection of piece tables.
 
 - [x] array based
-- [ ] btree
+- [ ] persistent btree
+  - [x] btree
 - [ ] splay tree
 - [ ] rb tree
 - [ ] linked list

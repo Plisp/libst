@@ -21,7 +21,7 @@ typedef struct sliceiter SliceIter;
 SliceTable *st_new(void);
 void st_free(SliceTable *st);
 SliceTable *st_new_from_file(const char *path);
-bool st_dump(SliceTable *st, const char *path);
+void st_dump(SliceTable *st, FILE *file);
 
 size_t st_size(SliceTable *st);
 size_t st_lfs(SliceTable *st);
