@@ -23,7 +23,7 @@ enum blktype { LARGE, LARGE_MMAP, SMALL };
 
 struct block {
 	enum blktype type;
-	int refs; // only for LARGE blocks
+	int refc; // only for LARGE blocks
 	char *data;
 	size_t size;
 };
@@ -117,7 +117,7 @@ static struct block *new_block(const char *data, size_t len)
 
 	if(len > HIGH_WATER) {
 		new->type = LARGE;
-		new->refs = 1;
+		new->refc = 1;
 	} else
 		new->type = SMALL;
 	return new;
@@ -131,13 +131,13 @@ static void free_block(struct block *block)
 		free(block);
 		break;
 	case LARGE_MMAP:
-		if(--block->refs == 0) {
+		if(--block->refc == 0) {
 			munmap(block->data, block->size);
 			free(block);
 		}
 		break;
 	case LARGE:
-		if(--block->refs == 0) {
+		if(--block->refc == 0) {
 			free(block->data);
 			free(block);
 		}
@@ -156,7 +156,7 @@ static void block_insert(struct block *block, size_t offset, const char *data,
 	block->size += len;
 	if(block->size > HIGH_WATER) {
 		block->type = LARGE;
-		block->refs = 1;
+		block->refc = 1;
 	}
 }
 
@@ -176,7 +176,7 @@ SliceTable *st_new(void)
 	st->bytes = 0;
 
 	struct block *init = malloc(sizeof(struct block));
-	*init = (struct block){ .type = LARGE, .refs = 1 };
+	*init = (struct block){ .type = LARGE, .refc = 1 };
 	st->vec[0] = (struct slice){ .bytes = 0, .block = init };
 	return st;
 }
@@ -213,14 +213,17 @@ SliceTable *st_new_from_file(const char *path)
 	st->bytes = len;
 	// ensures we do not ever try mutating the sentinel block
 	struct block *dummy = malloc(sizeof(struct block));
-	*dummy = (struct block){ .type = LARGE, .refs = 1 };
+	*dummy = (struct block){ .type = LARGE, .refc = 1 };
 	st->vec[0] = (struct slice){ .bytes = 0, .block = dummy };
 
 	struct block *init = malloc(sizeof(struct block));
-	*init = (struct block){ type, .refs = 1, data, len, };
+	*init = (struct block){ type, .refc = 1, data, len, };
 	st->vec[1] = (struct slice){ .bytes = len, .offset = 0, .block = init };
 	return st;
 }
+
+int st_depth(SliceTable *st) { return st->size; }
+SliceTable *st_clone(SliceTable *st) { return NULL; }
 
 void st_free(SliceTable *st)
 {
@@ -319,7 +322,7 @@ void st_insert(SliceTable *st, size_t pos, char *data, size_t len)
 			.offset = old->offset + pos,
 		};
 		if(old->block->type == LARGE || old->block->type == LARGE_MMAP)
-			old->block->refs++;
+			old->block->refc++;
 
 		size_t index = old - st->vec + 1;
 		size_t count = st->size - index;
@@ -355,7 +358,7 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 				.offset = slice->offset + pos + len
 			};
 			slice->bytes = pos;
-			slice->block->refs++;
+			slice->block->refc++;
 
 			size_t index = slice + 1 - st->vec;
 			size_t count = st->vec + st->size - (slice + 1);

@@ -1,9 +1,10 @@
 /*
- * TODO impl persistent b+tree slice sequence
+ * persistent b+tree slice sequence
  */
 
 #include <assert.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,13 +19,12 @@
 
 #include "st.h"
 
-// TODO update this value
-#define HIGH_WATER 3
+#define HIGH_WATER 4096
 
 enum blktype { LARGE, LARGE_MMAP, SMALL };
 struct block {
 	enum blktype type;
-	int refs; // only for LARGE blocks
+	atomic_int refc; // only for LARGE blocks, SMALL ones are cloned
 	char *data; // owned by the block
 	size_t len;
 };
@@ -36,29 +36,28 @@ struct slice {
 	size_t offset;
 };
 
-#define NODESIZE 128
+#define NODESIZE (256 - sizeof(atomic_int)) // close enough
 #define PER_B (SZSIZE + sizeof(void *))
 #define B ((int)(NODESIZE / PER_B))
 struct inner {
+	atomic_int refc;
 	size_t spans[B];
 	struct inner *children[B];
 };
 
+#define LEAFSIZE (512 - sizeof(atomic_int))
 #define PER_BL (SZSIZE + SLICESIZE)
-#define BL ((int)(NODESIZE / PER_BL))
+#define BL ((int)(LEAFSIZE / PER_BL))
 struct leaf {
+	atomic_int refc;
 	size_t spans[BL];
 	struct slice slices[BL];
 };
 
-#define LVAL(leaf, i) (leaf->spans[i] != ULONG_MAX ? &leaf->slices[i] : NULL)
-
 struct slicetable {
 	struct inner *root;
-	int height;
+	int levels;
 };
-
-static void print_node(int level, const struct inner *node);
 
 /* blocks */
 
@@ -68,36 +67,28 @@ static struct block *new_block(const char *data, size_t len)
 	new->len = len;
 	new->data = malloc(MAX(HIGH_WATER, len));
 	memcpy(new->data, data, len);
-
-	if(len > HIGH_WATER) {
-		new->type = LARGE;
-		new->refs = 1;
-	} else {
-		new->type = SMALL;
-		new->refs = 0;
-	}
+	new->type = len > HIGH_WATER ? LARGE : SMALL;
+	// we have exclusive access here
+	atomic_store_explicit(&new->refc, 1, memory_order_relaxed);
 	return new;
+}
+
+static void free_block(struct block *block)
+{
+	switch(block->type) {
+		case LARGE_MMAP: munmap(block->data, block->len); break;
+		case SMALL:
+		case LARGE:
+			free(block->data);
+	}
+	free(block);
 }
 
 static void drop_block(struct block *block)
 {
-	switch(block->type) {
-	case SMALL:
-		free(block->data);
-		free(block);
-		break;
-	case LARGE_MMAP:
-		if(--block->refs == 0) {
-			munmap(block->data, block->len);
-			free(block);
-		}
-		break;
-	case LARGE:
-		if(--block->refs == 0) {
-			free(block->data);
-			free(block);
-		}
-		break;
+	if(atomic_fetch_sub_explicit(&block->refc,1,memory_order_release) == 1) {
+		atomic_thread_fence(memory_order_acquire);
+		free_block(block);
 	}
 }
 
@@ -113,10 +104,8 @@ static void block_insert(struct block *block, size_t offset, const char *data,
 	memmove(start + len, start, block->len - offset);
 	memcpy(start, data, len);
 	block->len += len;
-	if(block->len > HIGH_WATER) {
+	if(block->len > HIGH_WATER)
 		block->type = LARGE;
-		block->refs = 1;
-	}
 }
 
 static void block_delete(struct block *block, size_t offset, size_t len)
@@ -126,6 +115,17 @@ static void block_delete(struct block *block, size_t offset, size_t len)
 	char *start = block->data + offset;
 	memmove(start, start + len, block->len - offset - len);
 	block->len -= len;
+}
+
+static void ensure_block_editable(struct block **blkptr)
+{
+	struct block *blk = *blkptr;
+	assert(blk->type == SMALL); // we should never be modifying LARGE blocks
+	if(atomic_load_explicit(&blk->refc, memory_order_acquire) != 1) {
+		struct block *copy = new_block(blk->data, blk->len);
+		drop_block(blk);
+		*blkptr = copy;
+	}
 }
 
 static struct slice new_slice(char *data, size_t len)
@@ -157,6 +157,7 @@ static struct inner *new_inner(void)
 {
 	struct inner *node = malloc(sizeof *node);
 	inner_clrslots(node, 0, B);
+	atomic_store_explicit(&node->refc, 1, memory_order_relaxed);
 	return node;
 }
 
@@ -164,6 +165,7 @@ static struct leaf *new_leaf(void)
 {
 	struct leaf *leaf = malloc(sizeof *leaf);
 	leaf_clrslots(leaf, 0, BL);
+	atomic_store_explicit(&leaf->refc, 1, memory_order_relaxed);
 	return leaf;
 }
 
@@ -235,13 +237,73 @@ static int leaf_fill(const struct leaf *leaf, int start)
 	return i;
 }
 
+void drop_node(struct inner *root, int level)
+{
+	if(level == 1) {
+		struct leaf *leaf = (struct leaf *)root;
+		if(atomic_fetch_sub_explicit(&leaf->refc,1,memory_order_release) == 1) {
+			atomic_thread_fence(memory_order_acquire);
+			for(int i = 0; i < leaf_fill(leaf, 0); i++)
+				drop_block(leaf->slices[i].blk);
+			free(leaf);
+		}
+	} else // inner node
+		if(atomic_fetch_sub_explicit(&root->refc, 1, memory_order_release == 1)) {
+			atomic_thread_fence(memory_order_acquire);
+			for(int i = 0; i < inner_fill(root, 0); i++)
+				drop_node(root->children[i], level - 1);
+			free(root);
+		}
+}
+
+
+static void incref(atomic_int *refc)
+{
+	// Should be safe as long as this increment is made visible to another
+	// thread T in passing the object to T, avoiding a data race when T reads
+	// refc == 1 and proceeds to modify the object inplace whilst our original
+	// thread is accessing it.
+	// I'm trusting the boost atomics documentation here
+	atomic_fetch_add_explicit(refc, 1, memory_order_relaxed);
+}
+
+static void ensure_leaf_editable(struct leaf **leafptr)
+{
+	struct leaf *leaf = *leafptr;
+	if(atomic_load_explicit(&leaf->refc, memory_order_acquire) != 1) {
+		struct leaf *copy = malloc(sizeof *copy);
+		memcpy(copy, leaf, sizeof *copy);
+		atomic_store_explicit(&copy->refc, 1, memory_order_relaxed);
+		// we now have more references to each block
+		for(int i = 0; i < leaf_fill(leaf, 0); i++)
+			incref(&leaf->slices[i].blk->refc);
+		drop_node((struct inner *)leaf, 1);
+		*leafptr = copy;
+	}
+}
+
+static void ensure_inner_editable(struct inner **innerptr)
+{
+	struct inner *inner = *innerptr;
+	if(atomic_load_explicit(&inner->refc, memory_order_acquire) != 1) {
+		struct inner *copy = malloc(sizeof *copy);
+		memcpy(copy, inner, sizeof *copy);
+		atomic_store_explicit(&copy->refc, 1, memory_order_relaxed);
+		// we now have more references
+		for(int i = 0; i < inner_fill(inner, 0); i++)
+			incref(&inner->children[i]->refc);
+		drop_node(inner, 2); // level > 1
+		*innerptr = copy;
+	}
+}
+
 /* simple */
 
 SliceTable *st_new(void)
 {
 	SliceTable *st = malloc(sizeof *st);
 	st->root = (struct inner *)new_leaf();
-	st->height = 1;
+	st->levels = 1;
 	return st;
 }
 
@@ -275,40 +337,40 @@ SliceTable *st_new_from_file(const char *path)
 
 	SliceTable *st = malloc(sizeof *st);
 	struct block *init = malloc(sizeof(struct block));
-	*init = (struct block){ type, .refs = 1, data, len };
+	*init = (struct block){ type, .refc = 1, data, len };
 
 	struct leaf *leaf = new_leaf();
 	leaf->slices[0] = (struct slice){ .blk = init, .offset = 0 };
 	leaf->spans[0] = len;
-	st->height = 1;
+	st->levels = 1;
 	st->root = (struct inner *)leaf;
 	return st;
 }
 
-void free_node(struct inner *root, int level)
-{
-	if(level == 1) {
-		struct leaf *leaf = (struct leaf *)root;
-		for(int i = 0; i < leaf_fill(leaf, 0); i++)
-			drop_block(leaf->slices[i].blk);
-		free(leaf);
-	} else { // inner node
-		for(int i = 0; i < inner_fill(root, 0); i++)
-			free_node(root->children[i], level - 1);
-		free(root);
-	}
-}
+int st_depth(SliceTable *st) { return st->levels - 1; }
 
 void st_free(SliceTable *st)
 {
-	free_node(st->root, st->height);
+	drop_node(st->root, st->levels);
 	free(st);
+}
+
+SliceTable *st_clone(SliceTable *st)
+{
+	SliceTable *clone = malloc(sizeof *clone);
+	clone->levels = st->levels;
+	clone->root = st->root;
+	if(st->levels == 1)
+		incref(&((struct leaf *)st->root)->refc);
+	else
+		incref(&st->root->refc);
+	return clone;
 }
 
 size_t st_size(SliceTable *st)
 {
 	struct inner *root = st->root;
-	if(st->height == 1) {
+	if(st->levels == 1) {
 		return leaf_sum((struct leaf *)root, leaf_fill((struct leaf *)root, 0));
 	} else
 		return inner_sum(root, inner_fill(root, 0));
@@ -326,23 +388,31 @@ void demote_slice(struct slice *slice, size_t span) {
 void slice_insert(struct slice *slice, size_t offset, char *data, size_t len,
 				size_t *span)
 {
-	if(*span <= HIGH_WATER && slice->blk->type != SMALL)
+	assert(*span <= HIGH_WATER);
+	if(slice->blk->type != SMALL)
 		demote_slice(slice, *span);
+	else
+		ensure_block_editable(&slice->blk);
+
 	block_insert(slice->blk, offset, data, len);
 	*span += len;
 }
 
 void slice_delete(struct slice *slice, size_t offset, size_t len, size_t *span)
 {
-	if(*span <= HIGH_WATER && slice->blk->type != SMALL)
+	assert(*span <= HIGH_WATER);
+	if(slice->blk->type != SMALL)
 		demote_slice(slice, *span);
+	else
+		ensure_block_editable(&slice->blk);
+
 	block_delete(slice->blk, offset, len);
 	*span -= len;
 }
 
 // merge slices in slices, returning the new number of slices.
 int merge_slices(size_t spans[static 5], struct slice slices[static 5],
-						int fill)
+				int fill)
 {
 	int i = 1;
 	while(i < fill) {
@@ -384,6 +454,7 @@ static struct leaf *split_leaf(struct leaf *leaf, int offset)
 }
 
 // merge j's slots into i, freeing j, returning the total size of slots moved
+// n.b. we must have cloned i,j already if necessary
 size_t merge_leaves(struct leaf * restrict i, struct leaf * restrict j,
 				int ifill, int jfill)
 {
@@ -397,7 +468,7 @@ size_t merge_leaves(struct leaf * restrict i, struct leaf * restrict j,
 		memcpy(&i->spans[0], &j->spans[0], jfill * SZSIZE);
 		memcpy(&i->slices[0], &j->slices[0], jfill * SLICESIZE);
 	}
-	// free_node is too drastic here, as the slices stick around
+	// drop_node is too drastic here, as the slices stick around
 	free(j);
 	return sum;
 }
@@ -415,7 +486,6 @@ size_t merge_inner(struct inner * restrict i, struct inner * restrict j,
 		memcpy(&i->spans[0], &j->spans[0], jfill * SZSIZE);
 		memcpy(&i->children[0], &j->children[0], jfill * SLICESIZE);
 	}
-	// free_node is too drastic here, as the children stick around
 	free(j);
 	return sum;
 }
@@ -484,11 +554,17 @@ static long edit_recurse(int level, struct inner *root,
 						struct inner **split, size_t *splitsize)
 {
 	if(level == 1) {
-		return base_case((void *)root, pos, span, (void*)split, splitsize, ctx);
+		return base_case((void*)root, pos, span, (void*)split, splitsize, ctx);
 	} else { // level > 1: inner node recursion
 		struct inner *childsplit = NULL;
 		size_t childsize = 0;
 		int i = inner_offset(root, &pos);
+
+		if(level == 2)
+			ensure_leaf_editable((struct leaf **)&root->children[i]);
+		else
+			ensure_inner_editable(&root->children[i]);
+
 		long delta = edit_recurse(level - 1, root->children[i], pos, span,
 								base_case, ctx, &childsplit, &childsize);
 		st_dbg("applying upwards delta at level %u: %ld\n", level, delta);
@@ -526,6 +602,7 @@ static long edit_recurse(int level, struct inner *root,
 				int fill = inner_fill(root, i);
 				if(level == 2) {
 					jfill = leaf_fill((void *)root->children[j], 0);
+					ensure_leaf_editable((void *)&root->children[j]);
 					if(childsize + jfill <= BL) {
 						root->spans[i] += 
 								merge_leaves((struct leaf *)root->children[i],
@@ -545,6 +622,7 @@ static long edit_recurse(int level, struct inner *root,
 					}
 				} else {
 					jfill = inner_fill(root->children[j], 0);
+					ensure_inner_editable(&root->children[j]);
 					if(childsize + jfill <= B) {
 						root->spans[i] += merge_inner(root->children[i],
 													root->children[j],
@@ -570,7 +648,7 @@ static long edit_recurse(int level, struct inner *root,
 
 /* insertion */
 
-// handle insertion within LARGE* slices
+// handle insertion within LARGE slices
 static long insert_within_slice(struct leaf *leaf, int fill, 
 							int i, size_t off, struct slice *new,
 							struct leaf **split, size_t *splitsize)
@@ -578,12 +656,12 @@ static long insert_within_slice(struct leaf *leaf, int fill,
 	size_t *left_span = &leaf->spans[i];
 	struct slice *left = &leaf->slices[i];
 	size_t right_span = *left_span - off;
-	size_t newlen = new->blk->len; // NOTE: is is necessary to save this delta
+	size_t newlen = new->blk->len; // n.b. is is necessary to save this delta
 	struct slice right = (struct slice) {
 		.blk = left->blk,
 		.offset = left->offset + off
 	};
-	left->blk->refs++;
+	left->blk->refc++;
 	*left_span = off; // truncate
 	// fill tmp
 	size_t tmpspans[5];
@@ -637,7 +715,7 @@ static long insert_within_slice(struct leaf *leaf, int fill,
 		memcpy(&spans[i+newfill], &leaf->spans[i+tmpfill-2], count * SZSIZE);
 		memcpy(&slices[i+newfill], &leaf->slices[i+tmpfill-2],count*SLICESIZE);
 		struct leaf *right_split = new_leaf();
-		// NOTE: we must compute delta directly since merging moves the insert
+		// n.b. we must compute delta directly since merging moves the insert
 		size_t oldsum = leaf_sum(leaf, fill) + right_span;
 		size_t new_leaf_fill = BL/2 + 1; // B=5 6,7 -> 3,4 in right
 		size_t right_fill = realfill - (BL/2 + 1); // B=4 5,6 -> 2,3 in right
@@ -708,23 +786,28 @@ void st_insert(SliceTable *st, size_t pos, char *data, size_t len)
 	struct inner *split = NULL;
 	size_t splitsize;
 	long span = (long)len;
-	edit_recurse(st->height, st->root, pos, &span, insert_leaf, data,
+	if(st->levels == 1)
+		ensure_leaf_editable((struct leaf **)&st->root);
+	else
+		ensure_inner_editable(&st->root);
+
+	edit_recurse(st->levels, st->root, pos, &span, &insert_leaf, data,
 				&split, &splitsize);
 	// handle root underflow
-	if(st->height > 1 && inner_fill(st->root, 0) == 1) {
+	if(st->levels > 1 && inner_fill(st->root, 0) == 1) {
 		st->root = &st->root[0];
-		st->height--;
+		st->levels--;
 	}
 	// handle root split
 	if(split) {
 		st_dbg("allocating new root\n");
 		struct inner *newroot = new_inner();
 		newroot->spans[0] = st_size(st);
-		newroot->children[0] = st->root;
+		newroot->children[0] = st->root; // we only switched the pointer
 		newroot->spans[1] = splitsize;
 		newroot->children[1] = split;
 		st->root = newroot;
-		st->height++;
+		st->levels++;
 	}
 }
 
@@ -744,7 +827,7 @@ static int delete_within_slice(struct leaf *leaf, int fill, int i,
 			.blk = slice->blk,
 			.offset = slice->offset + off + len
 		};
-		slice->blk->refs++;
+		slice->blk->refc++;
 		*slice_span = off; // truncate slice
 
 		size_t tmpspans[5];
@@ -812,7 +895,7 @@ static long delete_leaf(struct leaf *leaf, size_t pos, long *span,
 				.blk = leaf->slices[i].blk,
 				.offset = leaf->slices[i].offset + pos + len
 			};
-			leaf->slices[i].blk->refs++;
+			leaf->slices[i].blk->refc++;
 			leaf->spans[i] = pos;
 			i++;
 			// fill == BL, we must split
@@ -839,7 +922,7 @@ static long delete_leaf(struct leaf *leaf, size_t pos, long *span,
 		int start = i;
 		if(pos > 0) {
 			len -= leaf->spans[i] - pos; // no. deleted characters remaining
-			leaf->spans[i] = pos; // NOTE: may become zero, will be merged
+			leaf->spans[i] = pos; // n.b. may become zero, will be merged
 			start++;
 		}
 		int end = start;
@@ -863,7 +946,7 @@ static long delete_leaf(struct leaf *leaf, size_t pos, long *span,
 		fill = start + fill-end;
 		size_t tmpspans[5];
 		struct slice tmp[5];
-		// it's this simple! NOTE: start may be truncated. Thus use start - 2
+		// it's this simple! n.b. start may be truncated. Thus use start - 2
 		start = MAX(0, start - 2);
 		int tmpfill = MIN(fill - start, 4); // [][s|][|e][]
 		memcpy(tmpspans, &leaf->spans[start], tmpfill * SZSIZE);
@@ -890,17 +973,22 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 	st_dbg("st_delete at pos %zd of len %zd\n", pos, len);
 	struct inner *split = NULL;
 	size_t splitsize;
+	// we only need to ensure root uniqueness once
+	if(st->levels == 1)
+		ensure_leaf_editable((struct leaf **)&st->root);
+	else
+		ensure_inner_editable(&st->root);
 	do {
 		long remaining = -len;
-		// NOTE: remaining is bytes left to delete.
+		// n.b. remaining is bytes left to delete.
 		st_dbg("deleting... %ld bytes remaining\n", remaining);
-		edit_recurse(st->height, st->root, pos, &remaining,
-					delete_leaf, NULL, &split, &splitsize);
+		edit_recurse(st->levels, st->root, pos, &remaining,
+					&delete_leaf, NULL, &split, &splitsize);
 		len += remaining; // adjusted to byte delta (e.g. -3)
 		// handle underflow
-		if(st->height > 1 && inner_fill(st->root, 0) == 1) {
+		if(st->levels > 1 && inner_fill(st->root, 0) == 1) {
 			st->root = st->root->children[0];
-			st->height--;
+			st->levels--;
 		}
 		// handle root split
 		if(split) {
@@ -911,7 +999,7 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 			newroot->spans[1] = splitsize;
 			newroot->children[1] = split;
 			st->root = newroot;
-			st->height++;
+			st->levels++;
 		}
 	} while(len > 0);
 }
@@ -921,12 +1009,52 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 void st_print_struct_sizes(void)
 {
 	printf(
-		"Implementation: \e[38;5;1mst\e[0m\n"
+		"Implementation: \e[38;5;1mpersistent b+-tree\e[0m\n"
+		"B=%u, BL=%u\n"
 		"sizeof(struct inner): %zd\n"
 		"sizeof(struct leaf): %zd\n"
 		"sizeof(PieceTable): %zd\n",
-		sizeof(struct inner), sizeof(struct leaf), sizeof(SliceTable)
+		B, BL, sizeof(struct inner), sizeof(struct leaf), sizeof(SliceTable)
 	);
+}
+
+#define LVAL(leaf, i) (leaf->spans[i] != ULONG_MAX ? &leaf->slices[i] : NULL)
+
+static void print_node(int level, const struct inner *node)
+{
+	char out[256], *it = out;
+
+	if(level == 1) {
+		struct leaf *leaf = (struct leaf *)node;
+		it += sprintf(it, "[k: ");
+		for(int i = 0; i < BL; i++) {
+			size_t key = leaf->spans[i];
+			if(key != ULONG_MAX)
+				it += sprintf(it, "%lu|", key);
+			else
+				it += sprintf(it, "NUL|");
+		}
+		it--;
+		it += sprintf(it, " p: ");
+		for(int i = 0; i < BL; i++) {
+			struct slice *val = LVAL(leaf, i);
+			it += sprintf(it, "%lu|", val ? val->offset : 0);
+		}
+		it--;
+		sprintf(it, "]");
+	} else {
+		it += sprintf(it, "[");
+		for(int i = 0; i < B; i++) {
+			size_t key = node->spans[i];
+			if(key != ULONG_MAX)
+				it += sprintf(it, "%lu|", key);
+			else
+				it += sprintf(it, "0|");
+		}
+		it--;
+		sprintf(it, "]");
+	}
+	fprintf(stderr, "%s ", out);
 }
 
 static bool check_recurse(struct inner *root, int height, int level)
@@ -989,7 +1117,7 @@ static bool check_recurse(struct inner *root, int height, int level)
 
 bool st_check_invariants(SliceTable *st)
 {
-	return check_recurse(st->root, st->height, st->height);
+	return check_recurse(st->root, st->levels, st->levels);
 }
 
 void st_dump(SliceTable *st, FILE *file);
@@ -1017,43 +1145,6 @@ int main(void)
 }
 #endif
 
-static void print_node(int level, const struct inner *node)
-{
-	char out[256], *it = out;
-
-	if(level == 1) {
-		struct leaf *leaf = (struct leaf *)node;
-		it += sprintf(it, "[k: ");
-		for(int i = 0; i < BL; i++) {
-			size_t key = leaf->spans[i];
-			if(key != ULONG_MAX)
-				it += sprintf(it, "%lu|", key);
-			else
-				it += sprintf(it, "NUL|");
-		}
-		it--;
-		it += sprintf(it, " p: ");
-		for(int i = 0; i < BL; i++) {
-			struct slice *val = LVAL(leaf, i);
-			it += sprintf(it, "%lu|", val ? val->offset : 0);
-		}
-		it--;
-		sprintf(it, "]");
-	} else {
-		it += sprintf(it, "[");
-		for(int i = 0; i < B; i++) {
-			size_t key = node->spans[i];
-			if(key != ULONG_MAX)
-				it += sprintf(it, "%lu|", key);
-			else
-				it += sprintf(it, "0|");
-		}
-		it--;
-		sprintf(it, "]");
-	}
-	fprintf(stderr, "%s ", out);
-}
-
 /* global queue */
 
 struct q {
@@ -1076,7 +1167,7 @@ static struct q *dequeue(void) {
 
 void st_pprint(SliceTable *st)
 {
-	enqueue((struct q){ st->height, st->root });
+	enqueue((struct q){ st->levels, st->root });
 	struct q *next;
 	int lastlevel = 1;
 	while((next = dequeue())) {
@@ -1093,7 +1184,7 @@ void st_pprint(SliceTable *st)
 
 void st_dump(SliceTable *st, FILE *file)
 {
-	enqueue((struct q){ st->height, st->root });
+	enqueue((struct q){ st->levels, st->root });
 	struct q *next;
 	while((next = dequeue())) {
 		if(next->level > 1)
@@ -1137,11 +1228,11 @@ static void leaf_to_dot(FILE *file, const struct leaf *leaf)
 
 	for(int i = 0; i < BL; i++) {
 		size_t key = leaf->spans[i];
-		if(key != ULONG_MAX)
+		if(key != ULONG_MAX) {
 			FSTR(tmp, "%lu", key);
-		else
-			tmp = NULL;
-		graph_table_entry(file, tmp, NULL);
+			graph_table_entry(file, tmp, NULL);
+		} else
+			graph_table_entry(file, NULL, NULL);
 	}
 	for(int i = 0; i < BL; i++)
 		slice_to_dot(file, LVAL(leaf, i));
@@ -1157,6 +1248,7 @@ static void leaf_to_dot(FILE *file, const struct leaf *leaf)
 		graph_link(file, leaf, port, slice->blk, "body");
 	}
 	free(tmp);
+	free(port);
 }
 
 static void inner_to_dot(FILE *file, const struct inner *root, int height)
@@ -1201,14 +1293,14 @@ bool st_to_dot(SliceTable *st, const char *path)
 	graph_begin(file);
 
 	graph_table_begin(file, st, NULL);
-	FSTR(tmp, "height: %u", st->height);
+	FSTR(tmp, "height: %u", st->levels);
 	graph_table_entry(file, tmp, NULL);
 	graph_table_entry(file, "root", "root");
 	graph_table_end(file);
 
 	graph_link(file, st, "root", st->root, "body");
 	if(st->root)
-		inner_to_dot(file, st->root, st->height);
+		inner_to_dot(file, st->root, st->levels);
 
 	graph_end(file);
 	free(tmp);

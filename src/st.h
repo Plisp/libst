@@ -19,9 +19,9 @@ typedef struct sliceiter SliceIter;
 /* API */
 
 SliceTable *st_new(void);
-void st_free(SliceTable *st);
 SliceTable *st_new_from_file(const char *path);
-void st_dump(SliceTable *st, FILE *file);
+void st_free(SliceTable *st);
+SliceTable *st_clone(SliceTable *st);
 
 size_t st_size(SliceTable *st);
 size_t st_lfs(SliceTable *st);
@@ -33,8 +33,10 @@ void st_delete(SliceTable *st, size_t pos, size_t len);
 
 bool st_check_invariants(SliceTable *st);
 void st_pprint(SliceTable *st);
+void st_dump(SliceTable *st, FILE *file);
 void st_print_struct_sizes(void);
 bool st_to_dot(SliceTable *st, const char *path);
+int st_depth(SliceTable *st);
 
 /* iterator */
 
