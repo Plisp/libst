@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS = -Wall -Wno-parentheses -std=c11 -D_POSIX_C_SOURCE=199309L # for time.h
-DFLAGS = -Wextra -g -fsanitize=undefined -fsanitize=address
+DFLAGS = -Wextra -g -fsanitize=undefined #-fsanitize=address
 
 debug:
 	$(CC) array.c main.c -o array $(CFLAGS) $(DFLAGS)

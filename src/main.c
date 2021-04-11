@@ -7,6 +7,27 @@
 
 int main(void)
 {
+#if 1
+	SliceTable *st = st_new();
+	st_insert(st, 0, "x", 1);
+	FILE *sm = stdin;
+	//FILE *sm = fopen("mini", "r");
+	char line[10000], *s;
+	while(true) {
+		s = fgets(line, 10000, sm);
+		if(!s) break;
+		int linelen = strlen(s);
+		if(linelen < 3) continue;
+		linelen -= 2;
+		unsigned i = *s++;
+		unsigned j = *s++;
+		i = 1000*i + j;
+		st_insert(st, st_size(st) - (i%st_size(st)+i%2), s, linelen);
+		st_pprint(st);
+		assert(st_check_invariants(st));
+	}
+	st_free(st);
+#else
 #ifndef NDEBUG
 	SliceTable *st;
 	st_print_struct_sizes();
@@ -89,5 +110,6 @@ int main(void)
 			st_size(st), st_depth(st));
 	st_free(st);
 	st_free(clone);
+#endif
 #endif
 }

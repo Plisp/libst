@@ -19,7 +19,7 @@
 
 #include "st.h"
 
-#define HIGH_WATER 4096
+#define HIGH_WATER 8
 
 enum blktype { LARGE, LARGE_MMAP, SMALL };
 struct block {
@@ -36,7 +36,7 @@ struct slice {
 	size_t offset;
 };
 
-#define NODESIZE (256 - sizeof(atomic_int)) // close enough
+#define NODESIZE (128 - sizeof(atomic_int)) // close enough
 #define PER_B (SZSIZE + sizeof(void *))
 #define B ((int)(NODESIZE / PER_B))
 struct inner {
@@ -45,7 +45,7 @@ struct inner {
 	struct inner *children[B];
 };
 
-#define LEAFSIZE (512 - sizeof(atomic_int))
+#define LEAFSIZE (256 - sizeof(atomic_int))
 #define PER_BL (SZSIZE + SLICESIZE)
 #define BL ((int)(LEAFSIZE / PER_BL))
 struct leaf {
@@ -137,6 +137,8 @@ static struct slice new_slice(char *data, size_t len)
 
 /* tree utilities */
 
+static void print_node(int level, const struct inner *node);
+
 static void inner_clrslots(struct inner *node, int from, int to)
 {
 	assert(to <= B);
@@ -195,9 +197,6 @@ static int inner_offset(const struct inner *node, size_t *key)
 	while(*key && *key >= node->spans[i]) {
 		*key -= node->spans[i];
 		i++;
-#ifndef NDEBUG
-		if(i == B) assert(!*key); // off end is permitted, terminates loop
-#endif
 	}
 	return i;
 }
@@ -210,9 +209,6 @@ static int leaf_offset(const struct leaf *leaf, size_t *key)
 	while(*key && *key >= leaf->spans[i]) {
 		*key -= leaf->spans[i];
 		i++;
-#ifndef NDEBUG
-		if(i == BL) assert(!*key); // off end is permitted, terminates loop
-#endif
 	}
 	return i;
 }
@@ -438,7 +434,7 @@ static struct inner *split_inner(struct inner *node, int offset)
 	struct inner *split = new_inner();
 	int count = B - offset;
 	memcpy(&split->spans[0], &node->spans[offset], count * SZSIZE);
-	memcpy(&split->children[0], &node->children[offset], count * sizeof(void *));
+	memcpy(&split->children[0], &node->children[offset], count * sizeof(void*));
 	inner_clrslots(node, offset, B);
 	return split;
 }
@@ -456,15 +452,33 @@ static struct leaf *split_leaf(struct leaf *leaf, int offset)
 // merge j's slots into i, freeing j, returning the total size of slots moved
 // n.b. we must have cloned i,j already if necessary
 size_t merge_leaves(struct leaf * restrict i, struct leaf * restrict j,
-				int ifill, int jfill)
+				int ifill, int jfill, bool small_pair, bool ij)
 {
+	assert(ifill > 0);
 	size_t sum = leaf_sum(j, jfill);
-	if(i < j) {
-		memcpy(&i->spans[ifill], &j->spans[0], jfill * SZSIZE);
-		memcpy(&i->slices[ifill], &j->slices[0], jfill * SLICESIZE);
+	if(ij) {
+		int js = 0;
+		// merge adjacent i(ifill-1) and j(0) if they are both small
+		if(small_pair) {
+			slice_insert(&i->slices[ifill-1], i->spans[ifill-1],
+						j->slices[0].blk->data + j->slices[0].offset,
+						j->spans[0], &i->spans[ifill-1]);
+			drop_block(j->slices[0].blk);
+			js = 1;
+		}
+		memcpy(&i->spans[ifill], &j->spans[js], (jfill - js) * SZSIZE);
+		memcpy(&i->slices[ifill], &j->slices[js], (jfill - js) * SLICESIZE);
 	} else { // j < i
-		memmove(&i->spans[jfill], &i->spans[0], ifill);
-		memmove(&i->slices[jfill], &i->slices[0], ifill);
+		// merge adjacent j(jfill-1) and i(0) if they are both small
+		if(small_pair) {
+			slice_insert(&i->slices[0], 0,
+					j->slices[jfill-1].blk->data + j->slices[jfill-1].offset,
+					j->spans[jfill-1], &i->spans[0]);
+			drop_block(j->slices[jfill-1].blk);
+			jfill--;
+		}
+		memmove(&i->spans[jfill], &i->spans[0], ifill * SZSIZE);
+		memmove(&i->slices[jfill], &i->slices[0], ifill * SLICESIZE);
 		memcpy(&i->spans[0], &j->spans[0], jfill * SZSIZE);
 		memcpy(&i->slices[0], &j->slices[0], jfill * SLICESIZE);
 	}
@@ -474,17 +488,18 @@ size_t merge_leaves(struct leaf * restrict i, struct leaf * restrict j,
 }
 
 size_t merge_inner(struct inner * restrict i, struct inner * restrict j,
-				int ifill, int jfill)
+				int ifill, int jfill, bool ij)
 {
+	assert(ifill > 0);
 	size_t sum = inner_sum(j, jfill);
-	if(i < j) {
+	if(ij) {
 		memcpy(&i->spans[ifill], &j->spans[0], jfill * SZSIZE);
-		memcpy(&i->children[ifill], &j->children[0], jfill * SLICESIZE);
+		memcpy(&i->children[ifill], &j->children[0], jfill * sizeof(void *));
 	} else { // j < i
-		memmove(&i->spans[jfill], &i->spans[0], ifill);
-		memmove(&i->children[jfill], &i->children[0], ifill);
+		memmove(&i->spans[jfill], &i->spans[0], ifill * SZSIZE);
+		memmove(&i->children[jfill], &i->children[0], ifill * sizeof(void *));
 		memcpy(&i->spans[0], &j->spans[0], jfill * SZSIZE);
-		memcpy(&i->children[0], &j->children[0], jfill * SLICESIZE);
+		memcpy(&i->children[0], &j->children[0], jfill * sizeof(void *));
 	}
 	free(j);
 	return sum;
@@ -492,22 +507,40 @@ size_t merge_inner(struct inner * restrict i, struct inner * restrict j,
 
 // steals slots from j into i, returning the total size of slots moved
 size_t balance_leaves(struct leaf * restrict i, struct leaf * restrict j,
-					int ifill, int jfill)
+					int ifill, int jfill, bool small_pair, bool ij)
 {
 	size_t delta = 0;
 	int count = BL/2 + (BL&1) - ifill;
-	if(i < j) {
+	if(ij) {
+		// merge adjacent i(ifill-1) and j(0) if they are both small
+		if(small_pair) {
+			slice_insert(&j->slices[0], 0,
+					i->slices[ifill-1].blk->data + i->slices[ifill-1].offset,
+					i->spans[ifill-1], &j->spans[0]);
+			drop_block(i->slices[ifill-1].blk);
+			delta -= i->spans[ifill-1];
+			ifill--, count++;
+		}
 		for(int c = 0; c < count; c++) {
 			i->spans[ifill+c] = j->spans[c];
 			i->slices[ifill+c] = j->slices[c];
-			delta += i->spans[ifill+c];
+			delta += j->spans[c];
 		}
 		memmove(&j->spans[0], &j->spans[count], (jfill - count) * SZSIZE);
 		memmove(&j->slices[0], &j->slices[count], (jfill - count) * SLICESIZE);
 		leaf_clrslots(j, jfill - count, jfill);
 	} else {
-		memmove(&i->spans[count], &i->spans[0], count * SZSIZE);
-		memmove(&i->slices[count], &i->slices[0], count * SLICESIZE);
+		// merge adjacent j(jfill-1) and i(0) if they are both small
+		if(small_pair) {
+			slice_insert(&i->slices[0], 0,
+					j->slices[jfill-1].blk->data + j->slices[jfill-1].offset,
+					j->spans[jfill-1], &i->spans[0]);
+			drop_block(j->slices[jfill-1].blk);
+			delta += j->spans[jfill-1];
+			jfill--, count--;
+		}
+		memmove(&i->spans[count], &i->spans[0], ifill * SZSIZE);
+		memmove(&i->slices[count], &i->slices[0], ifill * SLICESIZE);
 		for(int c = 0; c < count; c++) {
 			i->spans[c] = j->spans[jfill-c-1];
 			i->slices[c] = j->slices[jfill-c-1];
@@ -519,22 +552,23 @@ size_t balance_leaves(struct leaf * restrict i, struct leaf * restrict j,
 }
 
 size_t balance_inner(struct inner * restrict i, struct inner * restrict j,
-					int ifill, int jfill)
+					int ifill, int jfill, bool ij)
 {
 	size_t delta = 0;
 	int count = B/2 + (B&1) - ifill;
-	if(i < j) {
+	if(ij) {
 		for(int c = 0; c < count; c++) {
 			i->spans[ifill+c] = j->spans[c];
 			i->children[ifill+c] = j->children[c];
 			delta += i->spans[ifill+c];
 		}
-		memmove(&j->spans[0], &j->spans[count], count * SZSIZE);
-		memmove(&j->children[0], &j->children[count], count * SLICESIZE);
+		memmove(&j->spans[0], &j->spans[count], (jfill - count) * SZSIZE);
+		memmove(&j->children[0], &j->children[count],
+				(jfill - count) * sizeof(void *));
 		inner_clrslots(j, jfill - count, jfill);
 	} else {
-		memmove(&i->spans[count], &i->spans[0], count * SZSIZE);
-		memmove(&i->children[count], &i->children[0], count * SLICESIZE);
+		memmove(&i->spans[count], &i->spans[0], ifill * SZSIZE);
+		memmove(&i->children[count], &i->children[0], ifill * sizeof(void *));
 		for(int c = 0; c < count; c++) {
 			i->spans[c] = j->spans[jfill-c-1];
 			i->children[c] = j->children[jfill-c-1];
@@ -559,9 +593,12 @@ static long edit_recurse(int level, struct inner *root,
 		struct inner *childsplit = NULL;
 		size_t childsize = 0;
 		int i = inner_offset(root, &pos);
-
+		// off end: back up a little
+		if(root->spans[i] == ULONG_MAX) {
+			i--;
+		}
 		if(level == 2)
-			ensure_leaf_editable((struct leaf **)&root->children[i]);
+			ensure_leaf_editable((void*)&root->children[i]);
 		else
 			ensure_inner_editable(&root->children[i]);
 
@@ -603,20 +640,37 @@ static long edit_recurse(int level, struct inner *root,
 				if(level == 2) {
 					jfill = leaf_fill((void *)root->children[j], 0);
 					ensure_leaf_editable((void *)&root->children[j]);
-					if(childsize + jfill <= BL) {
-						root->spans[i] += 
+					// are the two new adjacent slices after merging both SMALL
+					bool small_pair = false;
+					if(j < i) {
+						if(root->children[j]->spans[jfill-1] <= HIGH_WATER 
+								&& root->children[i]->spans[0] <= HIGH_WATER)
+							small_pair = true;
+					} else { // j > i &&
+						if(root->children[i]->spans[childsize-1] <= HIGH_WATER
+								&& root->children[j]->spans[0] <= HIGH_WATER)
+						small_pair = true;
+					}
+					int totalsize = childsize + jfill;
+					if(totalsize <= BL || (small_pair && totalsize == BL+1)) {
+						root->spans[i] +=
 								merge_leaves((struct leaf *)root->children[i],
 											(struct leaf *)root->children[j],
-											childsize, jfill);
-						memmove(&root->spans[j], &root->spans[j+1],fill-(j+1));
+											childsize, jfill, small_pair,
+											(i<j));
+						memmove(&root->spans[j], &root->spans[j+1],
+								(fill-(j+1)) * SZSIZE);
 						memmove(&root->children[j], &root->children[j+1],
-								fill - (j+1));
-						if(fill - 1 < BL/2 + (BL&1)) // root underflowed
+								(fill - (j+1)) * sizeof(void *));
+						inner_clrslots(root, fill - 1, fill);
+						if(fill - 1 < B/2 + (B&1)) // root underflowed
 							*splitsize = fill - 1;
 					} else {
-						balance_leaves((struct leaf *)root->children[i],
-										(struct leaf *)root->children[j],
-										childsize, jfill);
+						size_t delta =
+							balance_leaves((void*)root->children[i],
+											(void*)root->children[j],
+											childsize, jfill, small_pair,
+											i<j);
 						root->spans[j] -= delta;
 						root->spans[i] += delta;
 					}
@@ -626,16 +680,18 @@ static long edit_recurse(int level, struct inner *root,
 					if(childsize + jfill <= B) {
 						root->spans[i] += merge_inner(root->children[i],
 													root->children[j],
-													childsize, jfill);
-						memmove(&root->spans[j], &root->spans[j+1],fill-(j+1));
+													childsize, jfill, i<j);
+						memmove(&root->spans[j], &root->spans[j+1],
+								(fill-(j+1)) * SZSIZE);
 						memmove(&root->children[j], &root->children[j+1],
-								fill - (j+1));
+								(fill - (j+1)) * sizeof(void *));
+						inner_clrslots(root, fill - 1, fill);
 						if(fill - 1 < B/2 + (B&1)) // root underflowed
 							*splitsize = fill - 1;
 					} else {
 						size_t delta = balance_inner(root->children[i],
 													root->children[j],
-													childsize, jfill);
+													childsize, jfill, i<j);
 						root->spans[j] -= delta;
 						root->spans[i] += delta;
 					}
@@ -782,7 +838,7 @@ void st_insert(SliceTable *st, size_t pos, char *data, size_t len)
 	if(len == 0)
 		return;
 
-	st_dbg("st_insert at pos %zd of len %zd\n", pos, len);
+	st_dbg("st_insert of %.*s at pos %zd of len %zd\n", len, data, pos, len);
 	struct inner *split = NULL;
 	size_t splitsize;
 	long span = (long)len;
@@ -795,7 +851,7 @@ void st_insert(SliceTable *st, size_t pos, char *data, size_t len)
 				&split, &splitsize);
 	// handle root underflow
 	if(st->levels > 1 && inner_fill(st->root, 0) == 1) {
-		st->root = &st->root[0];
+		st->root = st->root->children[0];
 		st->levels--;
 	}
 	// handle root split
@@ -1073,7 +1129,7 @@ static bool check_recurse(struct inner *root, int height, int level)
 		for(int i = 0; i < fill; i++) {
 			issmall = leaf->spans[i] <= HIGH_WATER;
 			if(last_issmall && issmall) {
-				st_dbg("leaf size violation in slot %u of ", i);
+				st_dbg("adjacent slice size violation in slot %u of ", i);
 				print_node(1, root);
 				return false;
 			}
