@@ -10,14 +10,12 @@ opt:
 	$(CC) array.c main.c -o array -O3 $(CFLAGS) -DNDEBUG
 	$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG
 
-dot:
-	$(CC) $(CFLAGS) $(DFLAGS) btree.c -o btree
-	./btree
-	#dot -Tpng t.dot -o t.png
-	#./array
-	#dot -Tpng array.dot -o array.png
-	#./btree
-	#dot -Tpng btree.dot -o btree.png
+afl:
+	afl-gcc btree.c fuzz.c -o fuzz -O3 $(CFLAGS)
+	afl-fuzz -i tests -o results ./fuzz
+
+afl-debug:
+	$(CC) btree.c fuzz.c -o fuzz $(CFLAGS) $(DFLAGS) -DAFL_DEBUG
 
 clean:
-	rm -f array btree *.dot *.png
+	rm -f array btree fuzz *.dot *.png
