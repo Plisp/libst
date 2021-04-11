@@ -17,7 +17,7 @@
 size_t st_slices_moved = 0;
 
 // slices >= HIGH_WATER must be immutable
-#define HIGH_WATER 2048
+#define HIGH_WATER 4
 
 enum blktype { LARGE, LARGE_MMAP, SMALL };
 

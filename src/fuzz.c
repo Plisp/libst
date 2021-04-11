@@ -20,16 +20,21 @@ int main(void)
 			break;
 
 		size_t linelen = strlen(s);
-		if(linelen < 3)
+		if(linelen < 4)
 			continue;
 
 		linelen -= 2;
+		bool op = *s++ % 2;
 		unsigned i = *s++;
 		unsigned j = *s++;
 
 		i = 1000*i + j;
+		size_t pos = st_size(st) - (i % st_size(st) + i%2);
 
-		st_insert(st, st_size(st) - (i%st_size(st)+i%2), s, linelen);
+		if(op)
+			st_insert(st, pos, s, linelen);
+		else
+			st_delete(st, pos, linelen % st_size(st));
 #ifdef AFL_DEBUG
 		st_pprint(st);
 #endif
