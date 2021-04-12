@@ -907,7 +907,7 @@ static long delete_leaf(struct leaf *leaf, size_t pos, long *span,
 				.blk = delete->blk,
 				.offset = delete->offset + pos + len
 			};
-			incref(&delete->blk->refc);
+			// incref(&delete->blk->refc); n.b. we did this already above
 			leaf->spans[i] = pos;
 			i++;
 			// fill == BL, we must split
@@ -1066,9 +1066,10 @@ static void print_node(int level, const struct inner *node)
 		for(int i = 0; i < BL; i++) {
 			size_t key = leaf->spans[i];
 			if(key != ULONG_MAX)
-				it += sprintf(it, "%lu|", key);
+				it += sprintf(it, "\e[38;5;%dm%lu|",
+							leaf->slices[i].blk->type == SMALL ? 2 : 1, key);
 			else
-				it += sprintf(it, "NUL|");
+				it += sprintf(it, "\e[0mNUL|");
 		}
 		it--;
 		it += sprintf(it, "\e[0m p: ");
