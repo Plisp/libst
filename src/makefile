@@ -19,3 +19,6 @@ afl-debug:
 
 clean:
 	rm -f array btree fuzz *.dot *.png
+
+loc:
+	scc --exclude-dir=.ccls-cache --exclude-dir=test.xml

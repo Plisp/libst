@@ -69,9 +69,8 @@ int main(void)
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
 			(after.tv_sec - before.tv_sec) * 1000);
 
-	SliceTable *clone = st_clone(st);
-
 	clock_gettime(CLOCK_REALTIME, &before);
+	SliceTable *clone = st_clone(st);
 	for(int i = 0; i < 100000; i++) {
 		size_t n = 34+i*59;
 		st_delete(st, n, 5);

@@ -47,6 +47,11 @@ size_t st_size(SliceTable *st)
 	return st->bytes;
 }
 
+int st_depth(SliceTable *st)
+{
+	return st->size;
+}
+
 static size_t count_lfs(struct slice *slice)
 {
 	size_t count = 0;
@@ -222,8 +227,24 @@ SliceTable *st_new_from_file(const char *path)
 	return st;
 }
 
-int st_depth(SliceTable *st) { return st->size; }
-SliceTable *st_clone(SliceTable *st) { return NULL; }
+SliceTable *st_clone(SliceTable *st)
+{
+	SliceTable *clone = malloc(sizeof *clone);
+	clone->bytes = st->bytes;
+	clone->capacity = st->capacity;
+	clone->size = st->size;
+	clone->vec = malloc(st->size * sizeof(struct slice));
+	memcpy(clone->vec, st->vec, st->size * sizeof(struct slice));
+	// copy SMALL blocks, increment reference counts for LARGE blocks
+	for(size_t i = 0; i < clone->size; i++) {
+		struct slice *s = &clone->vec[i];
+		if(s->block->type == SMALL)
+			s->block = new_block(s->block->data + s->offset, s->block->size);
+		else
+			s->block->refc++;
+	}
+	return clone;
+}
 
 void st_free(SliceTable *st)
 {

@@ -19,7 +19,7 @@
 
 #include "st.h"
 
-#define HIGH_WATER 16000
+#define HIGH_WATER (1<<14)
 
 enum blktype { LARGE, LARGE_MMAP, SMALL };
 struct block {
@@ -93,7 +93,7 @@ static void drop_block(struct block *block)
 }
 
 static void block_insert(struct block *block, size_t offset, const char *data,
-			 size_t len)
+						 size_t len)
 {
 	assert(block->type == SMALL);
 	assert(offset <= block->len);
@@ -234,14 +234,14 @@ void drop_node(struct inner *root, int level)
 {
 	if(level == 1) {
 		struct leaf *leaf = (struct leaf *)root;
-		if(atomic_fetch_sub_explicit(&leaf->refc,1,memory_order_release) == 1) {
+		if(atomic_fetch_sub_explicit(&leaf->refc,1,memory_order_release)==1) {
 			atomic_thread_fence(memory_order_acquire);
 			for(int i = 0; i < leaf_fill(leaf, 0); i++)
 				drop_block(leaf->slices[i].blk);
 			free(leaf);
 		}
 	} else // inner node
-		if(atomic_fetch_sub_explicit(&root->refc, 1, memory_order_release == 1)) {
+		if(atomic_fetch_sub_explicit(&root->refc,1,memory_order_release)==1) {
 			atomic_thread_fence(memory_order_acquire);
 			for(int i = 0; i < inner_fill(root, 0); i++)
 				drop_node(root->children[i], level - 1);
@@ -292,6 +292,20 @@ static void ensure_inner_editable(struct inner **innerptr)
 
 /* simple */
 
+int st_depth(SliceTable *st)
+{
+	return st->levels - 1;
+}
+
+size_t st_size(SliceTable *st)
+{
+	struct inner *root = st->root;
+	if(st->levels == 1) {
+		return leaf_sum((struct leaf *)root, leaf_fill((struct leaf *)root, 0));
+	} else
+		return inner_sum(root, inner_fill(root, 0));
+}
+
 SliceTable *st_new(void)
 {
 	SliceTable *st = malloc(sizeof *st);
@@ -340,8 +354,6 @@ SliceTable *st_new_from_file(const char *path)
 	return st;
 }
 
-int st_depth(SliceTable *st) { return st->levels - 1; }
-
 void st_free(SliceTable *st)
 {
 	drop_node(st->root, st->levels);
@@ -358,15 +370,6 @@ SliceTable *st_clone(SliceTable *st)
 	else
 		incref(&st->root->refc);
 	return clone;
-}
-
-size_t st_size(SliceTable *st)
-{
-	struct inner *root = st->root;
-	if(st->levels == 1) {
-		return leaf_sum((struct leaf *)root, leaf_fill((struct leaf *)root, 0));
-	} else
-		return inner_sum(root, inner_fill(root, 0));
 }
 
 /* editing utilities */
