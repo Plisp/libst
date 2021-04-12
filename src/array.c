@@ -52,11 +52,11 @@ int st_depth(SliceTable *st)
 	return st->size;
 }
 
-static size_t count_lfs(struct slice *slice)
+static size_t count_lfs(char *s, size_t len)
 {
 	size_t count = 0;
-	for(size_t i = slice->offset; i < slice->offset + slice->bytes; i++)
-		if(slice->block->data[i] == '\n')
+	for(size_t i = 0; i < len; i++)
+		if(*s++ == '\n')
 			count++;
 	return count;
 }
@@ -65,14 +65,15 @@ size_t st_lfs(SliceTable *st)
 {
 	size_t lfs = 0;
 	for(size_t i = 0; i < st->size; i++)
-		lfs += count_lfs(&st->vec[i]);
+		lfs += count_lfs(st->vec[i].block->data + st->vec[i].offset,
+						st->vec[i].bytes);
 	return lfs;
 }
 
 static void st_pprint_slice(struct slice *slice)
 {
-	fprintf(stderr, "┃slice with %7ld bytes ┃ %7ld lfs ┃ data: %5.*s...┃\n",
-		slice->bytes, count_lfs(slice), (int)MIN(5, slice->bytes),
+	fprintf(stderr, "┃slice with %7ld bytes ┃ data: %5.*s...┃\n",
+		slice->bytes, (int)MIN(5, slice->bytes),
 		slice->block->data ? slice->block->data + slice->offset : NULL);
 }
 
@@ -311,11 +312,12 @@ static void slice_delete(struct slice *slice, size_t off, size_t len)
 	slice->bytes -= len;
 }
 
-void st_insert(SliceTable *st, size_t pos, char *data, size_t len)
+size_t st_insert(SliceTable *st, size_t pos, char *data, size_t len)
 {
 	if(len == 0)
-		return;
+		return 0;
 
+	st->bytes += len;
 	struct slice *old = st_search(st, pos, &pos);
 
 	if(old->block->type == SMALL)
@@ -358,18 +360,21 @@ void st_insert(SliceTable *st, size_t pos, char *data, size_t len)
 		start[0] = new_slice(data, len);
 		start[1] = new_right;
 	}
-	st->bytes += len;
+	return count_lfs(data, len);
 }
 
-void st_delete(SliceTable *st, size_t pos, size_t len)
+size_t st_delete(SliceTable *st, size_t pos, size_t len)
 {
 	len = MIN(len, st_size(st) - pos);
 	if(len == 0)
-		return;
-	st->bytes -= len;
+		return 0;
+
+	st->bytes -= len; // do it here as we mutate len
 	struct slice *slice = st_search(st, pos, &pos);
+	size_t lf_delta = 0;
 
 	if(pos + len < slice->bytes) {
+		lf_delta += count_lfs(slice->block->data + slice->offset + pos, len);
 		if(slice->block->type == SMALL)
 			slice_delete(slice, pos, len);
 		else {
@@ -396,11 +401,16 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 		struct slice *start, *end;
 
 		len -= slice->bytes - pos;
+		lf_delta += count_lfs(slice->block->data + slice->offset + pos,
+							slice->bytes - pos);
+		// truncate slice
 		slice->bytes = pos;
 
 		if(len > 0) {
 			start = ++slice;
 			while(len > 0 && len >= slice->bytes) {
+				lf_delta += count_lfs(slice->block->data + slice->offset,
+									slice->bytes);
 				free_block(slice->block);
 				len -= slice->bytes;
 				slice++;
@@ -410,6 +420,7 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 
 		end = slice;
 		if(len > 0) { // we could use another sentinel but that's a bit far
+			lf_delta += count_lfs(slice->block->data + slice->offset, len);
 			if(slice->block->type == SMALL)
 				slice_delete(slice, 0, len);
 			else {
@@ -423,6 +434,7 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 		maybe_shrink_vec(st);
 		st_slices_moved += count;
 	}
+	return lf_delta;
 }
 
 /* iterator */

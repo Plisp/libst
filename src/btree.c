@@ -61,6 +61,14 @@ struct slicetable {
 
 /* blocks */
 
+static size_t count_lfs(char *s, size_t len) {
+	size_t count = 0;
+	for(size_t i = 0; i < len; i++)
+		if(*s++ == '\n')
+			count++;
+	return count;
+}
+
 static struct block *new_block(const char *data, size_t len)
 {
 	struct block *new = malloc(sizeof *new);
@@ -328,7 +336,7 @@ SliceTable *st_new_from_file(const char *path)
 	if(len <= HIGH_WATER) {
 		data = malloc(HIGH_WATER);
 		lseek(fd, 0, SEEK_SET);
-		// TODO 
+		// TODO
 		if(read(fd, data, len) != len) {
 			free(data);
 			return NULL;
@@ -593,7 +601,7 @@ static long edit_recurse(int level, struct inner *root,
 				if(childsize == ULONG_MAX) { // deleted node
 					root->spans[i] = 0;
 					j = i;
-				} 
+				}
 				else if(level == 2) {
 					int jfill = leaf_fill((void *)root->children[j], 0);
 					ensure_leaf_editable((void *)&root->children[j]);
@@ -633,7 +641,7 @@ static long edit_recurse(int level, struct inner *root,
 /* insertion */
 
 // handle insertion within LARGE slices
-static long insert_within_slice(struct leaf *leaf, int fill, 
+static long insert_within_slice(struct leaf *leaf, int fill,
 							int i, size_t off, struct slice *new,
 							struct leaf **split, size_t *splitsize)
 {
@@ -645,7 +653,7 @@ static long insert_within_slice(struct leaf *leaf, int fill,
 		.blk = left->blk,
 		.offset = left->offset + off
 	};
-	left->blk->refc++;
+	incref(&left->blk->refc);
 	assert(off > 0); // should be handled by general case
 	*left_span = off;
 	// fill tmp
@@ -717,8 +725,13 @@ static long insert_within_slice(struct leaf *leaf, int fill,
 	}
 }
 
+struct insert_ctx {
+	size_t lfs;
+	char *data;
+};
+
 static long insert_leaf(struct leaf *leaf, size_t pos, long *span,
-						struct leaf **split, size_t *splitsize, void *data)
+						struct leaf **split, size_t *splitsize, void *ctx)
 {
 	int i = leaf_offset(leaf, &pos);
 	int fill = leaf_fill(leaf, i);
@@ -727,6 +740,9 @@ static long insert_leaf(struct leaf *leaf, size_t pos, long *span,
 	size_t len = *span;
 	long delta = len;
 	bool at_bound = (pos == leaf->spans[i]);
+	char *data = ((struct insert_ctx *)ctx)->data;
+	// we scan the data here for better locality
+	((struct insert_ctx *)ctx)->lfs = count_lfs(data, len);
 	// if we are inserting at 0, pos will be 0
 	if(pos == 0 && leaf->spans[0] <= HIGH_WATER) {
 		assert(i == 0);
@@ -763,21 +779,22 @@ static long insert_leaf(struct leaf *leaf, size_t pos, long *span,
 	return delta;
 }
 
-void st_insert(SliceTable *st, size_t pos, char *data, size_t len)
+size_t st_insert(SliceTable *st, size_t pos, char *data, size_t len)
 {
 	if(len == 0)
-		return;
+		return 0;
 
 	st_dbg("st_insert at pos %zd of len %zd\n", pos, len);
 	struct inner *split = NULL;
 	size_t splitsize;
 	long span = (long)len;
+	struct insert_ctx ctx = { .data = data };
 	if(st->levels == 1)
 		ensure_leaf_editable((struct leaf **)&st->root);
 	else
 		ensure_inner_editable(&st->root);
 
-	edit_recurse(st->levels, st->root, pos, &span, &insert_leaf, data,
+	edit_recurse(st->levels, st->root, pos, &span, &insert_leaf, &ctx,
 				&split, &splitsize);
 	// handle root underflow
 	if(st->levels > 1 && inner_fill(st->root, 0) == 1) {
@@ -796,6 +813,7 @@ void st_insert(SliceTable *st, size_t pos, char *data, size_t len)
 		st->root = newroot;
 		st->levels++;
 	}
+	return ctx.lfs;
 }
 
 /* deletion */
@@ -814,7 +832,7 @@ static int delete_within_slice(struct leaf *leaf, int fill, int i,
 			.blk = slice->blk,
 			.offset = slice->offset + off + len
 		};
-		slice->blk->refc++;
+		incref(&slice->blk->refc);
 		assert(off > 0); // should be handled by general case
 		*slice_span = off; // truncate slice
 
@@ -860,7 +878,6 @@ static int delete_within_slice(struct leaf *leaf, int fill, int i,
 }
 
 // span is negative to indicate deltas for partial deletions
-// TODO use ctx to indicate deleted lfs
 static long delete_leaf(struct leaf *leaf, size_t pos, long *span,
 						struct leaf **split, size_t *splitsize, void *ctx)
 {
@@ -875,17 +892,22 @@ static long delete_leaf(struct leaf *leaf, size_t pos, long *span,
 	if(pos > 0 && pos + len < leaf->spans[i]) {
 		size_t oldspan = leaf->spans[i];
 		size_t delta = -len;
+		struct slice *delete = &leaf->slices[i];
+		*(size_t *)ctx = count_lfs(delete->blk->data + delete->offset+pos,len);
+
 		int newfill = delete_within_slice(leaf, fill, i, pos, len);
 		if(newfill > BL) {
 			assert(newfill == BL+1);
 			st_dbg("deletion within piece: overflow\n");
-			leaf->spans[i] = oldspan; // restore for right_span calculation
+			// TODO we shouldn't have to recalculate here but I guess it's
+			// an uncommon case.
+			leaf->spans[i] = oldspan;
 			size_t right_span = leaf->spans[i] - pos - len;
 			struct slice new_right = {
-				.blk = leaf->slices[i].blk,
-				.offset = leaf->slices[i].offset + pos + len
+				.blk = delete->blk,
+				.offset = delete->offset + pos + len
 			};
-			leaf->slices[i].blk->refc++;
+			incref(&delete->blk->refc);
 			leaf->spans[i] = pos;
 			i++;
 			// fill == BL, we must split
@@ -909,24 +931,33 @@ static long delete_leaf(struct leaf *leaf, size_t pos, long *span,
 			*splitsize = newfill;
 		return delta;
 	} else { // pos + len >= leaf->spans[i]
+		size_t lfs = 0;
 		int start = i;
 		if(pos > 0) {
 			len -= leaf->spans[i] - pos; // no. deleted characters remaining
-			leaf->spans[i] = pos;
+			struct slice *si = &leaf->slices[i];
+			lfs += count_lfs(si->blk->data + si->offset + pos,
+							leaf->spans[i] - pos);
+			leaf->spans[i] = pos; // truncate si
 			start++;
 		}
 		int end = start;
 		while(end < fill && len >= leaf->spans[end]) {
-			drop_block(leaf->slices[end].blk);
+			struct slice *se = &leaf->slices[end];
+			lfs += count_lfs(se->blk->data + se->offset, leaf->spans[end]);
+			drop_block(se->blk);
 			len -= leaf->spans[end];
 			end++;
 		}
 		if(end < fill) { // if len == 0, st=end nothing happens. that's fine
+			struct slice *se = &leaf->slices[end];
+			lfs += count_lfs(se->blk->data + se->offset, len);
+			// delete prefix of end
 			if(leaf->spans[end] <= HIGH_WATER)
-				slice_delete(&leaf->slices[end], 0, len, &leaf->spans[end]);
+				slice_delete(se, 0, len, &leaf->spans[end]);
 			else { // cannot become 0 as the loop would've continued
 				leaf->spans[end] -= len;
-				leaf->slices[end].offset += len;
+				se->offset += len;
 			}
 			len = 0;
 		}
@@ -956,15 +987,16 @@ static long delete_leaf(struct leaf *leaf, size_t pos, long *span,
 
 		if(fill < BL/2 + (BL&1))
 			*splitsize = fill ? fill : ULONG_MAX; // ULONG_MAX indicates 0 size
-		return *span += len;
+		*(size_t *)ctx = lfs;
+		return *span += len; // |requested-deleted| = |change|
 	}
 }
 
-void st_delete(SliceTable *st, size_t pos, size_t len)
+size_t st_delete(SliceTable *st, size_t pos, size_t len)
 {
 	len = MIN(len, st_size(st) - pos);
 	if(len == 0)
-		return;
+		return 0;
 
 	st_dbg("st_delete at pos %zd of len %zd\n", pos, len);
 	struct inner *split = NULL;
@@ -974,6 +1006,8 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 		ensure_leaf_editable((struct leaf **)&st->root);
 	else
 		ensure_inner_editable(&st->root);
+
+	size_t lfs = 0;
 	do {
 		long remaining = -len;
 		// n.b. remaining is bytes left to delete.
@@ -981,7 +1015,7 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 		// search for pos + 1 (see above)
 		// n.b. we never search for st_size+1 since that entails len = 0
 		edit_recurse(st->levels, st->root, pos+1, &remaining,
-					&delete_leaf, NULL, &split, &splitsize);
+					&delete_leaf, &lfs, &split, &splitsize);
 		len += remaining; // adjusted to byte delta (e.g. -3)
 		// handle underflow
 		if(st->levels > 1 && inner_fill(st->root, 0) == 1) {
@@ -1002,6 +1036,8 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 		}
 		assert(st_check_invariants(st));
 	} while(len > 0);
+
+	return lfs;
 }
 
 /* debugging */

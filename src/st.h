@@ -27,9 +27,9 @@ size_t st_size(SliceTable *st);
 size_t st_lfs(SliceTable *st);
 
 // the caller must check that pos <= st_size(st)
-// TODO return deleted lfs as size_t
-void st_insert(SliceTable *st, size_t pos, char *data, size_t len);
-void st_delete(SliceTable *st, size_t pos, size_t len);
+// both return inserted/deleted linefeed count as size_t
+size_t st_insert(SliceTable *st, size_t pos, char *data, size_t len);
+size_t st_delete(SliceTable *st, size_t pos, size_t len);
 
 bool st_check_invariants(SliceTable *st);
 void st_pprint(SliceTable *st);

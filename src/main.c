@@ -70,7 +70,7 @@ int main(void)
 			(after.tv_sec - before.tv_sec) * 1000);
 
 	clock_gettime(CLOCK_REALTIME, &before);
-	SliceTable *clone = st_clone(st);
+	//SliceTable *clone = st_clone(st);
 	for(int i = 0; i < 100000; i++) {
 		size_t n = 34+i*59;
 		st_delete(st, n, 5);
@@ -85,15 +85,15 @@ int main(void)
 	FILE *f = fopen("test", "w");
 	st_dump(st, f);
 	fclose(f);
-	f = fopen("clone", "w");
-	st_dump(clone, f);
-	fclose(f);
+	//f = fopen("clone", "w");
+	//st_dump(clone, f);
+	//fclose(f);
 
 	printf("replace time: %f ms, len: %ld, depth %u\n",
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
 			(after.tv_sec - before.tv_sec) * 1000,
 			st_size(st), st_depth(st));
 	st_free(st);
-	st_free(clone);
+	//st_free(clone);
 #endif
 }
