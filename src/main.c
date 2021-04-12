@@ -59,7 +59,8 @@ int main(void)
 #else
 	st_print_struct_sizes();
 	struct timespec before, after;
-
+	// file may be found at
+	// https://raw.githubusercontent.com/jhallen/joes-sandbox/master/editor-perf/test.xml
 	const char *xml = "test.xml";
 	clock_gettime(CLOCK_REALTIME, &before);
 	SliceTable *st = st_new_from_file(xml);
@@ -81,8 +82,14 @@ int main(void)
 		assert(st_check_invariants(st));
 	}
 	clock_gettime(CLOCK_REALTIME, &after);
-	FILE *test = fopen("test", "w");
-	st_dump(st, test);
+	// dump and check that the clone/replacement worked
+	FILE *f = fopen("test", "w");
+	st_dump(st, f);
+	fclose(f);
+	f = fopen("clone", "w");
+	st_dump(clone, f);
+	fclose(f);
+
 	printf("replace time: %f ms, len: %ld, depth %u\n",
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
 			(after.tv_sec - before.tv_sec) * 1000,

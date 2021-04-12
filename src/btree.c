@@ -19,7 +19,7 @@
 
 #include "st.h"
 
-#define HIGH_WATER 4
+#define HIGH_WATER 16000
 
 enum blktype { LARGE, LARGE_MMAP, SMALL };
 struct block {
@@ -997,7 +997,6 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 			st->root = newroot;
 			st->levels++;
 		}
-		st_pprint(st);
 		assert(st_check_invariants(st));
 	} while(len > 0);
 }
@@ -1007,7 +1006,7 @@ void st_delete(SliceTable *st, size_t pos, size_t len)
 void st_print_struct_sizes(void)
 {
 	printf(
-		"Implementation: \e[38;5;1mpersistent b+-tree\e[0m\n"
+		"Implementation: \e[38;5;1mpersistent btree\e[0m\n"
 		"B=%u, BL=%u\n"
 		"sizeof(struct inner): %zd\n"
 		"sizeof(struct leaf): %zd\n"
