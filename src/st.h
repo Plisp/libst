@@ -21,41 +21,43 @@ typedef struct sliceiter SliceIter;
 SliceTable *st_new(void);
 SliceTable *st_new_from_file(const char *path);
 void st_free(SliceTable *st);
-SliceTable *st_clone(SliceTable *st);
+SliceTable *st_clone(const SliceTable *st);
 
-size_t st_size(SliceTable *st);
-size_t st_lfs(SliceTable *st);
+size_t st_size(const SliceTable *st);
 
 // the caller must check that pos <= st_size(st)
 // both return inserted/deleted linefeed count as size_t
 size_t st_insert(SliceTable *st, size_t pos, char *data, size_t len);
 size_t st_delete(SliceTable *st, size_t pos, size_t len);
 
-bool st_check_invariants(SliceTable *st);
-void st_pprint(SliceTable *st);
-void st_dump(SliceTable *st, FILE *file);
+bool st_check_invariants(const SliceTable *st);
+void st_pprint(const SliceTable *st);
+void st_dump(const SliceTable *st, FILE *file);
 void st_print_struct_sizes(void);
-bool st_to_dot(SliceTable *st, const char *path);
-int st_depth(SliceTable *st);
+bool st_to_dot(const SliceTable *st, const char *path);
+int st_depth(const SliceTable *st);
 
-/* iterator */
+/* read-only iterator */
 
-SliceIter *st_iter_get(SliceTable *st, size_t pos);
-SliceIter *st_iter_clone(SliceIter *it);
+SliceIter *st_iter_new(SliceTable *st, size_t pos);
+void st_iter_free(SliceIter *it);
 
-size_t st_iter_pos(SliceIter *it);
-size_t st_iter_visual_col(SliceIter *it);
+SliceTable *st_iter_st(const SliceIter *it);
+size_t st_iter_pos(const SliceIter *it);
+size_t st_iter_visual_col(const SliceIter *it);
+
+bool st_iter_next_chunk(SliceIter *it);
+bool st_iter_prev_chunk(SliceIter *it);
+char *st_iter_chunk(const SliceIter *it, size_t *len);
 
 bool st_iter_next_byte(SliceIter *it, size_t count);
 bool st_iter_prev_byte(SliceIter *it, size_t count);
-
-bool st_iter_next_line(SliceIter *it, size_t count);
-bool st_iter_next_line(SliceIter *it, size_t count);
+char st_iter_byte(const SliceIter *it);
 
 bool st_iter_next_cp(SliceIter *it, size_t count);
 bool st_iter_prev_cp(SliceIter *it, size_t count);
+long st_iter_cp(const SliceIter *it);
 
-bool st_iter_get_bytes(SliceIter *it, char *buf, size_t count);
+bool st_iter_next_line(SliceIter *it, size_t count);
+bool st_iter_prev_line(SliceIter *it, size_t count);
 
-bool st_iter_insert(SliceIter *it, char *data);
-bool st_iter_delete(SliceIter *it, size_t count);

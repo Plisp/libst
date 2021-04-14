@@ -19,19 +19,46 @@
 
 #include "st.h"
 
-#define HIGH_WATER (1<<14)
+#define HIGH_WATER (1<<10)
 
 enum blktype { LARGE, LARGE_MMAP, SMALL };
 struct block {
+	// atomic counter of references to this block
+	atomic_int refc;
+	// packed with int above. LARGE_MMAP indicates file mmap
 	enum blktype type;
-	atomic_int refc; // only for LARGE blocks, SMALL ones are cloned
-	char *data; // owned by the block
+	// owned by the block, which lives as long as the slicetable, same as the
+	// leaves that immutably point into it. So this is safe, but how in rust?
+	char *data;
+	// length of the block, used for mmap
 	size_t len;
+	// singly linked list for freeing later
+	struct block *next;
 };
 
 #define SLICESIZE sizeof(struct slice)
 #define SZSIZE sizeof(size_t)
 struct slice {
+	// TODO remove SMALL and combine block/offset fields in struct slice
+	// This is a legacy of the original recursive piece table design
+	//
+	// instead of slices, use a single char *. for blocks <= HIGH_WATER this
+	// points to offset 0 of a heap allocation of the maximum HIGH_WATER bytes.
+	//
+	// If an insertion into the block would overflow, we promote it to a real
+	// struct block managed by the slicetable itself (mmap needs len) and store
+	// a pointer into its data. The recursion must pass a parameter for this.
+	//
+	// Assuming a small number of these exist over the buffer's lifetime, we
+	// avoid the complexity of deleting 'stale' blocks (the cost of these is
+	// a single pointer to the real block, which will point to a persistent
+	// allocation anyways except in the case of transient use) and push these
+	// to a singly linked list (reference counted links) for cleanup when the
+	// slicetable is freed
+	//
+	// This means that when editing a shared leaf, all its small blocks must be
+	// cloned, whilst no update to LARGE blocks is necessary. Block demotion
+	// is no longer necessary, as this step clones allocations below HIGH_WATER
 	struct block *blk;
 	size_t offset;
 };
@@ -56,7 +83,7 @@ struct leaf {
 
 struct slicetable {
 	struct inner *root;
-	int levels;
+	int levels; // we could tag pointers instead, but that's a hack
 };
 
 /* blocks */
@@ -146,7 +173,7 @@ static struct slice new_slice(char *data, size_t len)
 /* tree utilities */
 
 static void print_node(int level, const struct inner *node);
-bool st_check_invariants(SliceTable *st);
+bool st_check_invariants(const SliceTable *st);
 
 static void inner_clrslots(struct inner *node, int from, int to)
 {
@@ -300,12 +327,9 @@ static void ensure_inner_editable(struct inner **innerptr)
 
 /* simple */
 
-int st_depth(SliceTable *st)
-{
-	return st->levels - 1;
-}
+int st_depth(const SliceTable *st) { return st->levels - 1; }
 
-size_t st_size(SliceTable *st)
+size_t st_size(const SliceTable *st)
 {
 	struct inner *root = st->root;
 	if(st->levels == 1) {
@@ -352,7 +376,9 @@ SliceTable *st_new_from_file(const char *path)
 
 	SliceTable *st = malloc(sizeof *st);
 	struct block *init = malloc(sizeof(struct block));
-	*init = (struct block){ type, .refc = 1, data, len };
+	*init = (struct block){ 
+		.type = type, .refc = 1, .data = data, .len = len
+	};
 
 	struct leaf *leaf = new_leaf();
 	leaf->slices[0] = (struct slice){ .blk = init, .offset = 0 };
@@ -368,7 +394,7 @@ void st_free(SliceTable *st)
 	free(st);
 }
 
-SliceTable *st_clone(SliceTable *st)
+SliceTable *st_clone(const SliceTable *st)
 {
 	SliceTable *clone = malloc(sizeof *clone);
 	clone->levels = st->levels;
@@ -1040,6 +1066,71 @@ size_t st_delete(SliceTable *st, size_t pos, size_t len)
 	return lfs;
 }
 
+/* iterator */
+
+struct stackentry {
+	struct inner *node;
+	int idx;
+};
+
+#define STACKSZ 4
+struct sliceiter {
+	SliceTable *st;
+	size_t pos; // absolute position
+	size_t off; // offset into leaf or stack[0]
+	struct stackentry stack[STACKSZ];
+};
+
+SliceIter *st_iter_new(SliceTable *st, size_t pos)
+{
+	SliceIter *it = malloc(sizeof *it);
+	int level = st->levels;
+	struct inner *node = st->root;
+
+	while(level > 1) {
+		int i = inner_offset(node, &pos);
+		if(level-1 < STACKSZ) {
+			it->stack[level-1] = (struct stackentry){ node, i };
+			incref(&node->refc);
+		}
+		node = node->children[i];
+	}
+	struct leaf *leaf = (struct leaf *)node;
+	int i = leaf_offset(leaf, &pos);
+	it->stack[0] = (struct stackentry){ (void *)leaf, i };
+	incref(&leaf->refc);
+	it->off = pos;
+	return it;
+}
+
+SliceTable *st_iter_st(const SliceIter *it) { return it->st; }
+size_t st_iter_pos(const SliceIter *it) { return it->pos; }
+size_t st_iter_visual_col(const SliceIter *it);
+
+bool st_iter_next_chunk(SliceIter *it);
+bool st_iter_prev_chunk(SliceIter *it);
+
+char *st_iter_chunk(const SliceIter *it, size_t *len)
+{
+	int i = it->stack[0].idx;
+	struct leaf *leaf = (struct leaf *)it->stack[0].node;
+	struct slice *slice = &leaf->slices[i];
+	*len = leaf->spans[i] - it->off;
+	return slice->blk->data + slice->offset + it->off;
+}
+
+bool st_iter_next_byte(SliceIter *it, size_t count);
+bool st_iter_prev_byte(SliceIter *it, size_t count);
+char st_iter_byte(const SliceIter *it);
+
+bool st_iter_next_cp(SliceIter *it, size_t count);
+bool st_iter_prev_cp(SliceIter *it, size_t count);
+long st_iter_cp(const SliceIter *it);
+
+bool st_iter_next_line(SliceIter *it, size_t count);
+bool st_iter_prev_line(SliceIter *it, size_t count);
+
+
 /* debugging */
 
 void st_print_struct_sizes(void)
@@ -1158,7 +1249,7 @@ static bool check_recurse(struct inner *root, int height, int level)
 	}
 }
 
-bool st_check_invariants(SliceTable *st)
+bool st_check_invariants(const SliceTable *st)
 {
 	return check_recurse(st->root, st->levels, st->levels);
 }
@@ -1183,7 +1274,7 @@ static struct q *dequeue(void) {
 	return (tail == head) ? NULL : &queue[tail++ % QSIZE];
 }
 
-void st_pprint(SliceTable *st)
+void st_pprint(const SliceTable *st)
 {
 	enqueue((struct q){ st->levels, st->root });
 	struct q *next;
@@ -1200,7 +1291,7 @@ void st_pprint(SliceTable *st)
 	puts("");
 }
 
-void st_dump(SliceTable *st, FILE *file)
+void st_dump(const SliceTable *st, FILE *file)
 {
 	enqueue((struct q){ st->levels, st->root });
 	struct q *next;
@@ -1302,7 +1393,7 @@ static void inner_to_dot(FILE *file, const struct inner *root, int height)
 	free(port);
 }
 
-bool st_to_dot(SliceTable *st, const char *path)
+bool st_to_dot(const SliceTable *st, const char *path)
 {
 	char *tmp = NULL;
 	FILE *file = fopen(path, "w");

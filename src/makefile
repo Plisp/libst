@@ -3,7 +3,7 @@ CFLAGS = -Wall -Wno-parentheses -std=c11 -D_POSIX_C_SOURCE=199309L # for time.h
 DFLAGS = -Wextra -g -fsanitize=undefined #-fsanitize=address
 
 debug:
-	$(CC) array.c main.c -o array $(CFLAGS) $(DFLAGS)
+	#$(CC) array.c main.c -o array $(CFLAGS) $(DFLAGS)
 	$(CC) btree.c main.c -o btree $(CFLAGS) $(DFLAGS)
 
 opt:

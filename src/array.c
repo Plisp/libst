@@ -1,5 +1,5 @@
 /*
- * simple array layout. TODO merging optimization
+ * simple array layout
  */
 
 #include <assert.h>
@@ -42,12 +42,12 @@ struct slicetable {
 
 /* simple */
 
-size_t st_size(SliceTable *st)
+size_t st_size(const SliceTable *st)
 {
 	return st->bytes;
 }
 
-int st_depth(SliceTable *st)
+int st_depth(const SliceTable *st)
 {
 	return st->size;
 }
@@ -61,23 +61,14 @@ static size_t count_lfs(char *s, size_t len)
 	return count;
 }
 
-size_t st_lfs(SliceTable *st)
-{
-	size_t lfs = 0;
-	for(size_t i = 0; i < st->size; i++)
-		lfs += count_lfs(st->vec[i].block->data + st->vec[i].offset,
-						st->vec[i].bytes);
-	return lfs;
-}
-
 static void st_pprint_slice(struct slice *slice)
 {
 	fprintf(stderr, "┃slice with %7ld bytes ┃ data: %5.*s...┃\n",
 		slice->bytes, (int)MIN(5, slice->bytes),
-		slice->block->data ? slice->block->data + slice->offset : NULL);
+		slice->block->data + slice->offset);
 }
 
-void st_pprint(SliceTable *st)
+void st_pprint(const SliceTable *st)
 {
 	fprintf(stderr, "PieceTable with %ld/%ld slices, %ld bytes\n", st->size,
 		st->capacity, st_size(st));
@@ -91,7 +82,7 @@ void st_pprint(SliceTable *st)
 	      stderr);
 }
 
-bool st_check_invariants(SliceTable *st)
+bool st_check_invariants(const SliceTable *st)
 {
 	size_t len = 0;
 	for(size_t i = 0; i < st->size; i++)
@@ -180,10 +171,10 @@ SliceTable *st_new(void)
 	st->vec = malloc(sizeof(struct slice));
 	st->size = st->capacity = 1;
 	st->bytes = 0;
-
+	// ensures we do not ever try mutating the sentinel block
 	struct block *init = malloc(sizeof(struct block));
-	*init = (struct block){ .type = LARGE, .refc = 1 };
-	st->vec[0] = (struct slice){ .bytes = 0, .block = init };
+	*init = (struct block){ .type = LARGE, .refc = 1, .data = malloc(1) };
+	st->vec[0] = (struct slice){ .bytes = 0, .offset = 0, .block = init };
 	return st;
 }
 
@@ -217,10 +208,10 @@ SliceTable *st_new_from_file(const char *path)
 	st->vec = malloc(2 * sizeof(struct slice));
 	st->size = st->capacity = 2;
 	st->bytes = len;
-	// ensures we do not ever try mutating the sentinel block
+
 	struct block *dummy = malloc(sizeof(struct block));
-	*dummy = (struct block){ .type = LARGE, .refc = 1 };
-	st->vec[0] = (struct slice){ .bytes = 0, .block = dummy };
+	*dummy = (struct block){ .type = LARGE, .refc = 1, .data = malloc(1) };
+	st->vec[0] = (struct slice){ .bytes = 0, .offset = 0, .block = dummy };
 
 	struct block *init = malloc(sizeof(struct block));
 	*init = (struct block){ type, .refc = 1, data, len, };
@@ -228,7 +219,7 @@ SliceTable *st_new_from_file(const char *path)
 	return st;
 }
 
-SliceTable *st_clone(SliceTable *st)
+SliceTable *st_clone(const SliceTable *st)
 {
 	SliceTable *clone = malloc(sizeof *clone);
 	clone->bytes = st->bytes;
@@ -255,7 +246,7 @@ void st_free(SliceTable *st)
 	free(st);
 }
 
-void st_dump(SliceTable *st, FILE *file)
+void st_dump(const SliceTable *st, FILE *file)
 {
 	for(size_t i = 1; i < st->size; i++) {
 		fprintf(file, "%.*s", (int)st->vec[i].bytes,
@@ -263,7 +254,7 @@ void st_dump(SliceTable *st, FILE *file)
 	}
 }
 
-struct slice *st_search(SliceTable *st, size_t pos, size_t *off)
+struct slice *st_search(const SliceTable *st, size_t pos, size_t *off)
 {
 	struct slice *slice = st->vec;
 
@@ -437,15 +428,29 @@ size_t st_delete(SliceTable *st, size_t pos, size_t len)
 	return lf_delta;
 }
 
-/* iterator */
+/* TODO iterator */
 
-//PieceIterator *st_iter_get
+struct sliceiter {
+	SliceTable *st;
+	struct slice *slice;
+	char *data; // points directly
+};
+
+SliceIter *st_iter_new(SliceTable *st, size_t pos)
+{
+	SliceIter *it = malloc(sizeof *it);
+	size_t off;
+	it->slice = st_search(st, pos, &off);
+	it->data = it->slice->block->data + it->slice->offset + off;
+	it->st = st;
+	return it;
+}
 
 /* dot output */
 
 #include "dot.h"
 
-static void st_array_to_dot(SliceTable *st, FILE *file)
+static void st_array_to_dot(const SliceTable *st, FILE *file)
 {
 	graph_link(file, st, "vec", st->vec, "body");
 	graph_table_begin(file, st->vec, "aquamarine3");
@@ -468,7 +473,7 @@ static void st_array_to_dot(SliceTable *st, FILE *file)
 	}
 }
 
-bool st_to_dot(SliceTable *st, const char *path)
+bool st_to_dot(const SliceTable *st, const char *path)
 {
 	char *tmp = NULL;
 	FILE *file = fopen(path, "w");

@@ -13,6 +13,12 @@ int main(void)
 	st = st_new_from_file("vector.c");
 	st_pprint(st);
 	assert(st_size(st) == 9616);
+	st_insert(st, 0, "test\n", 5);
+	struct sliceiter *it = st_iter_new(st, 0);
+	size_t len;
+	char *test = st_iter_chunk(it, &len);
+	st_dbg("len: %zd, %.*s", len, (int)len, test);
+	/*
 	st_dbg("deletion: whole piece case\n");
 	st_delete(st, 0, 9616);
 	st_pprint(st);
@@ -56,6 +62,7 @@ int main(void)
 	st_delete(st, 0, 1000000);
 	st_pprint(st);
 	st_free(st);
+	*/
 #else
 	st_print_struct_sizes();
 	struct timespec before, after;

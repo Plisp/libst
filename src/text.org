@@ -12,7 +12,7 @@
 ** SWMR parallelism
 +seqlock for reader invalidation, with sufficient safety guarantee (linked-list)+
 - snapshot by treating original text as immutable
-- persistence
+- persistence (solves two problems)
 * NO
 - line indexing (...nothing yet)
 - byte indexing
