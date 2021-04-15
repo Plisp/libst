@@ -16,7 +16,9 @@
 typedef struct slicetable SliceTable;
 typedef struct sliceiter SliceIter;
 
-/* API */
+/* API
+ * in general the caller must check that pos <= st_size(st)
+ */
 
 SliceTable *st_new(void);
 SliceTable *st_new_from_file(const char *path);
@@ -25,9 +27,8 @@ SliceTable *st_clone(const SliceTable *st);
 
 size_t st_size(const SliceTable *st);
 
-// the caller must check that pos <= st_size(st)
 // both return inserted/deleted linefeed count as size_t
-size_t st_insert(SliceTable *st, size_t pos, char *data, size_t len);
+size_t st_insert(SliceTable *st, size_t pos, const char *data, size_t len);
 size_t st_delete(SliceTable *st, size_t pos, size_t len);
 
 bool st_check_invariants(const SliceTable *st);
@@ -39,25 +40,30 @@ int st_depth(const SliceTable *st);
 
 /* read-only iterator */
 
+// it is an error to call any of st_iter_* except st_iter_free after the
+// SliceTable instance has been freed or modified
+
 SliceIter *st_iter_new(SliceTable *st, size_t pos);
 void st_iter_free(SliceIter *it);
+// reinitializes the iterator
+SliceIter *st_iter_to(SliceIter *it, size_t pos);
 
 SliceTable *st_iter_st(const SliceIter *it);
 size_t st_iter_pos(const SliceIter *it);
-size_t st_iter_visual_col(const SliceIter *it);
 
+char *st_iter_chunk(const SliceIter *it, size_t *len);
 bool st_iter_next_chunk(SliceIter *it);
 bool st_iter_prev_chunk(SliceIter *it);
-char *st_iter_chunk(const SliceIter *it, size_t *len);
 
-bool st_iter_next_byte(SliceIter *it, size_t count);
-bool st_iter_prev_byte(SliceIter *it, size_t count);
 char st_iter_byte(const SliceIter *it);
+char st_iter_next_byte(SliceIter *it, size_t count);
+char st_iter_prev_byte(SliceIter *it, size_t count);
 
-bool st_iter_next_cp(SliceIter *it, size_t count);
-bool st_iter_prev_cp(SliceIter *it, size_t count);
 long st_iter_cp(const SliceIter *it);
+long st_iter_next_cp(SliceIter *it, size_t count);
+long st_iter_prev_cp(SliceIter *it, size_t count);
 
 bool st_iter_next_line(SliceIter *it, size_t count);
 bool st_iter_prev_line(SliceIter *it, size_t count);
 
+//size_t st_iter_visual_col(const SliceIter *it);

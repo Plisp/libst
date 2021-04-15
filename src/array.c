@@ -52,7 +52,7 @@ int st_depth(const SliceTable *st)
 	return st->size;
 }
 
-static size_t count_lfs(char *s, size_t len)
+static size_t count_lfs(const char *s, size_t len)
 {
 	size_t count = 0;
 	for(size_t i = 0; i < len; i++)
@@ -284,14 +284,15 @@ static void maybe_shrink_vec(SliceTable *st)
 	}
 }
 
-static struct slice new_slice(char *data, size_t len)
+static struct slice new_slice(const char *data, size_t len)
 {
 	struct block *block = new_block(data, len);
 	struct slice p = (struct slice){ .block = block, .offset = 0, .bytes = len };
 	return p;
 }
 
-static void slice_insert(struct slice *slice, size_t off, char *data, size_t len)
+static void slice_insert(struct slice *slice, size_t off,
+						const char *data, size_t len)
 {
 	block_insert(slice->block, slice->offset + off, data, len);
 	slice->bytes += len;
@@ -303,7 +304,7 @@ static void slice_delete(struct slice *slice, size_t off, size_t len)
 	slice->bytes -= len;
 }
 
-size_t st_insert(SliceTable *st, size_t pos, char *data, size_t len)
+size_t st_insert(SliceTable *st, size_t pos, const char *data, size_t len)
 {
 	if(len == 0)
 		return 0;

@@ -5,20 +5,65 @@
 
 #include "st.h"
 
-int main(void)
+int main(int argc, char **argv)
 {
+#if 1
+	if(argc < 4) {
+		printf("usage <filename> <search pattern> <replacement pattern>");
+		return 1;
+	}
+	const char *pattern = argv[2];
+	const char *replace = argv[3];
+	size_t len = strlen(pattern);
+	size_t replacelen = strlen(replace);
+	assert(len > 1);
+	SliceTable *st = st_new_from_file(argv[1]);
+	SliceIter *it = st_iter_new(st, 0);
+	size_t i = 0;
+	char c;
+	bool *matchpos = calloc(len, sizeof(bool));
+	int matches = 0;
+
+	struct timespec before, after;
+	clock_gettime(CLOCK_REALTIME, &before);
+	// a basic search, comparable to ropey's search_and_replace.rs
+	while((c = st_iter_next_byte(it, 1)) != -1) {
+		for(int m = len - 2; m >= 0; m--) {
+			if(matchpos[m]) { // already matched at i
+				if(c == pattern[m+1]) {
+					matchpos[m+1] = matchpos[m];
+				}
+				matchpos[m] = 0;
+			}
+		}
+		// try matching latest character
+		if(c == pattern[0]) {
+			matchpos[0] = i;
+		}
+		if(matchpos[len-1]) { // fully matched!
+			st_delete(st, i - len+2, len);
+			st_insert(st, i - len+2, replace, replacelen);
+			st_iter_to(it, i+1);
+			matchpos[len-1] = 0;
+			matches++;
+		}
+		i++;
+	}
+	clock_gettime(CLOCK_REALTIME, &after);
+	st_dump(st, stdout);
+	fprintf(stderr, "found replaced %d matches in %f ms\n", matches,
+			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
+			(after.tv_sec - before.tv_sec) * 1000);
+	free(matchpos);
+	st_iter_free(it);
+	st_free(st);
+#else
 #ifndef NDEBUG
 	SliceTable *st;
 	st_print_struct_sizes();
 	st = st_new_from_file("vector.c");
 	st_pprint(st);
 	assert(st_size(st) == 9616);
-	st_insert(st, 0, "test\n", 5);
-	struct sliceiter *it = st_iter_new(st, 0);
-	size_t len;
-	char *test = st_iter_chunk(it, &len);
-	st_dbg("len: %zd, %.*s", len, (int)len, test);
-	/*
 	st_dbg("deletion: whole piece case\n");
 	st_delete(st, 0, 9616);
 	st_pprint(st);
@@ -62,7 +107,6 @@ int main(void)
 	st_delete(st, 0, 1000000);
 	st_pprint(st);
 	st_free(st);
-	*/
 #else
 	st_print_struct_sizes();
 	struct timespec before, after;
@@ -104,5 +148,6 @@ int main(void)
 			st_size(st), st_depth(st));
 	st_free(st);
 	st_free(clone);
+#endif
 #endif
 }

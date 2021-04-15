@@ -19,7 +19,7 @@
 
 #include "st.h"
 
-#define HIGH_WATER (1<<10)
+#define HIGH_WATER (1<<12)
 
 enum blktype { LARGE, LARGE_MMAP, SMALL };
 struct block {
@@ -39,7 +39,7 @@ struct block {
 #define SLICESIZE sizeof(struct slice)
 #define SZSIZE sizeof(size_t)
 struct slice {
-	// TODO remove SMALL and combine block/offset fields in struct slice
+	// TODO impl remove SMALL and combine block/offset fields in struct slice
 	// This is a legacy of the original recursive piece table design
 	//
 	// instead of slices, use a single char *. for blocks <= HIGH_WATER this
@@ -72,7 +72,7 @@ struct inner {
 	struct inner *children[B];
 };
 
-#define LEAFSIZE (128 - sizeof(atomic_int))
+#define LEAFSIZE (256 - sizeof(atomic_int))
 #define PER_BL (SZSIZE + SLICESIZE)
 #define BL ((int)(LEAFSIZE / PER_BL))
 struct leaf {
@@ -88,7 +88,7 @@ struct slicetable {
 
 /* blocks */
 
-static size_t count_lfs(char *s, size_t len) {
+static size_t count_lfs(const char *s, size_t len) {
 	size_t count = 0;
 	for(size_t i = 0; i < len; i++)
 		if(*s++ == '\n')
@@ -163,7 +163,7 @@ static void ensure_block_editable(struct block **blkptr)
 	}
 }
 
-static struct slice new_slice(char *data, size_t len)
+static struct slice new_slice(const char *data, size_t len)
 {
 	struct block *block = new_block(data, len);
 	struct slice s = (struct slice){ .blk = block, .offset = 0 };
@@ -376,7 +376,7 @@ SliceTable *st_new_from_file(const char *path)
 
 	SliceTable *st = malloc(sizeof *st);
 	struct block *init = malloc(sizeof(struct block));
-	*init = (struct block){ 
+	*init = (struct block){
 		.type = type, .refc = 1, .data = data, .len = len
 	};
 
@@ -415,8 +415,8 @@ void demote_slice(struct slice *slice, size_t span) {
 	slice->offset = 0;
 }
 
-void slice_insert(struct slice *slice, size_t offset, char *data, size_t len,
-				size_t *span)
+void slice_insert(struct slice *slice, size_t offset,
+				const char *data, size_t len, size_t *span)
 {
 	assert(*span <= HIGH_WATER);
 	if(slice->blk->type != SMALL)
@@ -753,7 +753,7 @@ static long insert_within_slice(struct leaf *leaf, int fill,
 
 struct insert_ctx {
 	size_t lfs;
-	char *data;
+	const char *data;
 };
 
 static long insert_leaf(struct leaf *leaf, size_t pos, long *span,
@@ -766,7 +766,7 @@ static long insert_leaf(struct leaf *leaf, size_t pos, long *span,
 	size_t len = *span;
 	long delta = len;
 	bool at_bound = (pos == leaf->spans[i]);
-	char *data = ((struct insert_ctx *)ctx)->data;
+	const char *data = ((struct insert_ctx *)ctx)->data;
 	// we scan the data here for better locality
 	((struct insert_ctx *)ctx)->lfs = count_lfs(data, len);
 	// if we are inserting at 0, pos will be 0
@@ -805,7 +805,7 @@ static long insert_leaf(struct leaf *leaf, size_t pos, long *span,
 	return delta;
 }
 
-size_t st_insert(SliceTable *st, size_t pos, char *data, size_t len)
+size_t st_insert(SliceTable *st, size_t pos, const char *data, size_t len)
 {
 	if(len == 0)
 		return 0;
@@ -1073,63 +1073,232 @@ struct stackentry {
 	int idx;
 };
 
-#define STACKSZ 4
+#define STACKSIZE 1
 struct sliceiter {
+	char *data;
+	size_t off; // offset into slice
+	struct leaf *leaf;
+	int leaf_offset;
+	struct stackentry stack[STACKSIZE];
 	SliceTable *st;
 	size_t pos; // absolute position
-	size_t off; // offset into leaf or stack[0]
-	struct stackentry stack[STACKSZ];
 };
+
+SliceIter *st_iter_to(SliceIter *it, size_t pos)
+{
+	it->pos = pos;
+	// TODO having 2 exceptions is quite ugly
+	size_t size = st_size(it->st);
+	bool off_end = (pos == size);
+	if(size != 0)
+		pos -= off_end;
+
+	struct inner *node = it->st->root;
+	int level = it->st->levels;
+	while(level > 1) {
+		int i = 0;
+		while(pos && pos >= node->spans[i])
+			pos -= node->spans[i++];
+		st_dbg("iter_to: found i: %d at level %d\n", i, level);
+		int stackidx = level - 2; // level 2 goes at stack[0], etc.
+		if(stackidx < STACKSIZE)
+			it->stack[stackidx] = (struct stackentry){ node, i };
+
+		node = node->children[i];
+		level--;
+	}
+	struct leaf *leaf = (struct leaf *)node;
+	it->leaf = leaf;
+	// find position within leaf
+	int i = 0;
+	while(pos && pos >= leaf->spans[i])
+		pos -= leaf->spans[i++];
+
+	it->leaf_offset = i;
+	it->off = pos;
+	st_dbg("iter_to at leaf: i: %d, pos %zd\n", i, pos);
+
+	if(size != 0) {
+		struct block *blk = leaf->slices[i].blk;
+		it->data = blk->data + leaf->slices[i].offset + pos;
+		// we searched for pos - 1
+		if(off_end) {
+			it->data++;
+			it->off++;
+		}
+	}
+	return it;
+}
 
 SliceIter *st_iter_new(SliceTable *st, size_t pos)
 {
 	SliceIter *it = malloc(sizeof *it);
-	int level = st->levels;
-	struct inner *node = st->root;
+	it->st = st;
+	return st_iter_to(it, pos);
+}
 
-	while(level > 1) {
-		int i = inner_offset(node, &pos);
-		if(level-1 < STACKSZ) {
-			it->stack[level-1] = (struct stackentry){ node, i };
-			incref(&node->refc);
-		}
-		node = node->children[i];
-	}
-	struct leaf *leaf = (struct leaf *)node;
-	int i = leaf_offset(leaf, &pos);
-	it->stack[0] = (struct stackentry){ (void *)leaf, i };
-	incref(&leaf->refc);
-	it->off = pos;
-	return it;
+int iter_stacksize(SliceIter *it)
+{
+	return MIN(it->st->levels - 1, STACKSIZE);
+}
+
+void st_iter_free(SliceIter *it)
+{
+	// TODO should make sure, but we shouldn't have to manage this given the
+	// invalidation upon freeing/modification of the corresponding SliceTable.
+	/*
+	drop_node((void *)it->leaf, 1);
+	for(int i = 0; i < iter_stacksize(it); i++)
+		drop_node(it->stack[i].node, 2);
+	*/
+	free(it);
 }
 
 SliceTable *st_iter_st(const SliceIter *it) { return it->st; }
 size_t st_iter_pos(const SliceIter *it) { return it->pos; }
-size_t st_iter_visual_col(const SliceIter *it);
 
-bool st_iter_next_chunk(SliceIter *it);
-bool st_iter_prev_chunk(SliceIter *it);
+static bool iter_off_end(const SliceIter *it)
+{
+	return it->off == it->leaf->spans[it->leaf_offset];
+}
+
+bool st_iter_next_chunk(SliceIter *it)
+{
+	int i = it->leaf_offset;
+	struct leaf *leaf = it->leaf;
+	it->pos += leaf->spans[i] - it->off;
+	// fast path: same leaf
+	if(i < BL-1 && leaf->spans[i+1] != ULONG_MAX) {
+		it->leaf_offset++;
+		it->off = 0;
+		it->data = leaf->slices[i+1].blk->data + leaf->slices[i+1].offset;
+		return true;
+	}
+	// traverse upwards until we find one
+	int si = 0;
+	struct stackentry s = it->stack[si];
+	while(si < iter_stacksize(it) &&
+			!(s.idx < B-1 && s.node->spans[s.idx+1] != ULONG_MAX))
+		s = it->stack[++si];
+
+	if(si != iter_stacksize(it)) {
+		it->stack[si].idx++;
+		while(--si > 0) {
+			it->stack[si].node = it->stack[si+1].node->children[0];
+			it->stack[si].idx = 0;
+		}
+		int leaf_idx = it->stack[0].idx;
+		it->leaf = (struct leaf *)it->stack[0].node->children[leaf_idx];
+		it->leaf_offset = 0;
+		it->off = 0;
+		it->data = it->leaf->slices[0].blk->data + it->leaf->slices[0].offset;
+		return true;
+	} else { // if the stack was insufficient, search from the root
+		st_dbg("gave up. scanning from root for %zd\n", it->pos);
+		st_iter_to(it, it->pos);
+		return !iter_off_end(it);
+	}
+}
+
+bool st_iter_prev_chunk(SliceIter *it)
+{
+	int i = it->leaf_offset;
+	struct leaf *leaf = it->leaf;
+	it->pos -= it->off + 1;
+	// fast path: same leaf
+	if(i > 0) {
+		it->leaf_offset--;
+		it->off = it->leaf->spans[i-1] - 1;
+		struct slice *newslice = &leaf->slices[i-1];
+		it->data = newslice->blk->data + newslice->offset + it->off;
+		return true;
+	}
+	int si = 0;
+	struct stackentry s = it->stack[si];
+	while(si < iter_stacksize(it) && s.idx == 0)
+		s = it->stack[++si];
+
+	if(si != iter_stacksize(it)) {
+		it->stack[si].idx--;
+		while(--si > 0) {
+			struct inner *parent = it->stack[si+1].node;
+			int parentfill = inner_fill(parent, 0);
+			it->stack[si].node = parent->children[parentfill-1];
+			int fill = inner_fill(it->stack[si].node, 0);
+			it->stack[si].idx = fill - 1;
+		}
+		int leaf_i = it->stack[0].idx;
+		struct leaf *leaf = (struct leaf *)it->stack[0].node->children[leaf_i];
+		int fill = leaf_fill(leaf, 0);
+		it->leaf = leaf;
+		it->leaf_offset = fill - 1;
+		it->off = leaf->spans[it->leaf_offset] - 1;
+		struct slice *slice = &leaf->slices[fill-1];
+		it->data = slice->blk->data + slice->offset + it->off;
+		return true;
+	} else { // if stack was insufficient, reinitialize
+		st_iter_to(it, MAX(0, it->pos - it->off - 1));
+		return it->pos != 0;
+	}
+	return true;
+}
 
 char *st_iter_chunk(const SliceIter *it, size_t *len)
 {
-	int i = it->stack[0].idx;
-	struct leaf *leaf = (struct leaf *)it->stack[0].node;
-	struct slice *slice = &leaf->slices[i];
-	*len = leaf->spans[i] - it->off;
-	return slice->blk->data + slice->offset + it->off;
+	*len = it->leaf->spans[it->leaf_offset];
+	return it->data - it->off;
 }
 
-bool st_iter_next_byte(SliceIter *it, size_t count);
-bool st_iter_prev_byte(SliceIter *it, size_t count);
-char st_iter_byte(const SliceIter *it);
+char st_iter_byte(const SliceIter *it)
+{
+	return iter_off_end(it) ? -1 : it->data[0];
+}
 
-bool st_iter_next_cp(SliceIter *it, size_t count);
-bool st_iter_prev_cp(SliceIter *it, size_t count);
+char st_iter_next_byte(SliceIter *it, size_t count)
+{
+	if(iter_off_end(it))
+		return -1;
+
+	size_t left = it->leaf->spans[it->leaf_offset] - it->off;
+	if(count < left) {
+		it->off += count;
+		it->data += count;
+		it->pos += count;
+		return *it->data;
+	} // cursor ends up off end if no next chunk
+	st_dbg("iter_next_byte: wanted %zd, had %zd\n", count, left);
+	st_iter_next_chunk(it);
+	return st_iter_next_byte(it, count - left);
+}
+
+char st_iter_prev_byte(SliceIter *it, size_t count)
+{
+	if(it->pos == 0)
+		return -1;
+
+	size_t left = it->off;
+	if(count <= left) {
+		it->off -= count;
+		it->data -= count;
+		it->pos -= count;
+		return *it->data;
+	}
+	st_dbg("iter_prev_byte: wanted %zd, had %zd\n", count, left);
+	st_iter_prev_chunk(it);
+	return st_iter_prev_byte(it, count - left);
+}
+
+#define MBERR ((size_t)-1)
+#define MBPART ((size_t)-2)
+
 long st_iter_cp(const SliceIter *it);
+long st_iter_next_cp(SliceIter *it, size_t count);
+long st_iter_prev_cp(SliceIter *it, size_t count);
 
 bool st_iter_next_line(SliceIter *it, size_t count);
 bool st_iter_prev_line(SliceIter *it, size_t count);
 
+size_t st_iter_visual_col(const SliceIter *it);
 
 /* debugging */
 
