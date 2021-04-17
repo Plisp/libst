@@ -9,7 +9,7 @@ int main(int argc, char **argv)
 {
 #if 1
 	if(argc < 4) {
-		printf("usage <filename> <search pattern> <replacement pattern>");
+		fprintf(stderr, "usage <filename> <search pattern> <replacement pattern>\n");
 		return 1;
 	}
 	const char *pattern = argv[2];
@@ -18,6 +18,7 @@ int main(int argc, char **argv)
 	size_t replacelen = strlen(replace);
 	assert(len > 1);
 	SliceTable *st = st_new_from_file(argv[1]);
+	SliceTable *clone = st_clone(st);
 	SliceIter *it = st_iter_new(st, 0);
 	size_t i = 0;
 	char c;
@@ -56,6 +57,7 @@ int main(int argc, char **argv)
 			(after.tv_sec - before.tv_sec) * 1000);
 	free(matchpos);
 	st_iter_free(it);
+	st_free(clone);
 	st_free(st);
 #else
 #ifndef NDEBUG
@@ -87,6 +89,7 @@ int main(int argc, char **argv)
 	st = st_new_from_file("vector.c");
 	st_insert(st, 2, "XXX", 3);
 	st_delete(st, 1, 9616);
+	st_to_dot(st, "t.dot");
 	st_pprint(st);
 	st_free(st);
 	st_dbg("deletion: multiple piece case start boundary\n");
@@ -113,7 +116,7 @@ int main(int argc, char **argv)
 	// file may be found at
 	// https://raw.githubusercontent.com/jhallen/joes-sandbox/master/editor-perf/test.xml
 	const char *xml = "test.xml";
-	clock_gettime(CLOCK_REALTIME, &before);
+	//clock_gettime(CLOCK_REALTIME, &before);
 	SliceTable *st = st_new_from_file(xml);
 	clock_gettime(CLOCK_REALTIME, &after);
 	printf("load time: %f ms\n",

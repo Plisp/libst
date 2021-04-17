@@ -40,4 +40,5 @@ int main(void)
 #endif
 		assert(st_check_invariants(st));
 	}
+	st_free(st);
 }
