@@ -1073,7 +1073,7 @@ struct stackentry {
 	int idx;
 };
 
-#define STACKSIZE 1
+#define STACKSIZE 4
 struct sliceiter {
 	char *data;
 	size_t off; // offset into slice
