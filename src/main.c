@@ -7,7 +7,7 @@
 
 int main(int argc, char **argv)
 {
-#if 1
+#if 0
 	if(argc < 4) {
 		fprintf(stderr, "usage <filename> <search pattern> <replacement pattern>\n");
 		return 1;
@@ -51,7 +51,7 @@ int main(int argc, char **argv)
 		i++;
 	}
 	clock_gettime(CLOCK_REALTIME, &after);
-	st_dump(st, stdout);
+	//st_dump(st, stdout);
 	fprintf(stderr, "found replaced %d matches in %f ms\n", matches,
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
 			(after.tv_sec - before.tv_sec) * 1000);

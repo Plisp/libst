@@ -190,7 +190,7 @@ static void ensure_node_editable(struct node **nodeptr, int level)
 		if(level == 1) {
 			for(int i = 0; i < fill; i++)
 				if(node->spans[i] <= HIGH_WATER) {
-					char *copy = malloc(node->spans[i]);
+					char *copy = malloc(HIGH_WATER);
 					memcpy(copy, node->child[i], node->spans[i]);
 					node->child[i] = copy;
 				}
