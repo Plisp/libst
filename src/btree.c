@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <limits.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,10 @@
 #include "st.h"
 
 #define HIGH_WATER (1<<12)
+
+#if __x86_64__
+	#define USETAGS
+#endif
 
 enum blktype { HEAP, MMAP };
 struct block {
@@ -292,6 +297,18 @@ SliceTable *st_clone(const SliceTable *st)
 char *slice_insert(SliceTable *st, char *target, size_t offset,
 				const char *data, size_t len, size_t *tspan)
 {
+#ifdef USETAGS
+	// if target is tagged as LARGE, untag and copy it
+	if((uintptr_t)target & 1ULL<<63) {
+		char *new = malloc(HIGH_WATER);
+		memcpy(new, (void *)((uintptr_t)target & ~(1ULL<<63)), *tspan);
+		target = new;
+	}
+	// untag data
+	if((uintptr_t)data & 1ULL<<63) {
+		data = (char *)((uintptr_t)data & ~(1ULL<<63));
+	}
+#endif
 	if(*tspan + len > HIGH_WATER) {
 		struct block *new = malloc(sizeof *new);
 		new->len = *tspan + len;
@@ -322,7 +339,14 @@ int merge_slices(SliceTable *st, size_t spans[static 5], char *data[static 5],
 			// both are smaller S|S, i doesn't move
 			data[i-1] = slice_insert(st, data[i-1], spans[i-1],
 									data[i], spans[i], &spans[i-1]);
+#ifdef USETAGS
+			// if not tagged as LARGE, free
+			if(!((uintptr_t)data[i] & 1ULL<<63)) {
+				free(data[i]);
+			}
+#else
 			free(data[i]);
+#endif
 			memmove(&spans[i], &spans[i+1], (fill - (i+1)) * sizeof(size_t));
 			memmove(&data[i], &data[i+1], (fill - (i+1)) * sizeof(char *));
 			fill--;
@@ -777,9 +801,14 @@ static long delete_leaf(SliceTable *st, struct node *leaf,
 		leaf->spans[i] = pos; // truncate slice
 		// truncation might have resulted in a small block
 		if(pos <= HIGH_WATER) {
+#ifdef USETAGS
+			// assume userspace 0 bits, use high bit
+			leaf->child[i] = (void *)((uintptr_t)leaf->child[i] | 1ULL<<63);
+#else
 			char *new = malloc(HIGH_WATER);
 			memcpy(new, olddata, pos);
 			leaf->child[i] = new;
+#endif
 		}
 		int newfill = delete_within_slice(st, leaf, fill, i, right_span, right);
 		if(newfill > B) {
