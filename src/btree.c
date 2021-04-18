@@ -1038,10 +1038,10 @@ bool st_iter_next_chunk(SliceIter *it)
 	}
 	// traverse upwards until we find one
 	int si = 0;
-	struct stackentry s = it->stack[si];
+	struct stackentry *s = &it->stack[si];
 	while(si < iter_stacksize(it) &&
-			!(s.idx < B-1 && s.node->spans[s.idx+1] != ULONG_MAX))
-		s = it->stack[++si];
+			!(s->idx < B-1 && s->node->spans[s->idx+1] != ULONG_MAX))
+		s++, si++;
 
 	if(si != iter_stacksize(it)) {
 		it->stack[si].idx++;
@@ -1077,9 +1077,9 @@ bool st_iter_prev_chunk(SliceIter *it)
 		return true;
 	}
 	int si = 0;
-	struct stackentry s = it->stack[si];
-	while(si < iter_stacksize(it) && s.idx == 0)
-		s = it->stack[++si];
+	struct stackentry *s = &it->stack[si];
+	while(si < iter_stacksize(it) && s->idx == 0)
+		s++, si++;
 
 	if(si != iter_stacksize(it)) {
 		it->stack[si].idx--;
