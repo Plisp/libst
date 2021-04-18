@@ -8,7 +8,7 @@ debug:
 
 opt:
 	#$(CC) array.c main.c -o array -O3 $(CFLAGS) -DNDEBUG
-	$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG
+	$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG -g
 
 afl:
 	afl-gcc btree.c fuzz.c -o fuzz -O3 $(CFLAGS)
