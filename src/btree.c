@@ -19,7 +19,7 @@
 
 #include "st.h"
 
-#define HIGH_WATER (1<<10)
+#define HIGH_WATER (1<<12)
 
 enum blktype { HEAP, MMAP };
 struct block {
@@ -84,17 +84,18 @@ static void drop_block(struct block *block)
 	}
 }
 
-static void block_insert(char *block, size_t off, const char *data, size_t len)
+static void block_insert(char *block, size_t blocklen, size_t off,
+						const char *data, size_t len)
 {
 	assert(off <= HIGH_WATER);
-	memmove(block + off + len, block + off, HIGH_WATER - off - len);
+	memmove(block + off + len, block + off, blocklen - off);
 	memcpy(block + off, data, len);
 }
 
-static void block_delete(char *block, size_t off, size_t len)
+static void block_delete(char *block, size_t blocklen, size_t off, size_t len)
 {
 	assert(off + len <= HIGH_WATER);
-	memmove(block + off, block + off + len, HIGH_WATER - off - len);
+	memmove(block + off, block + off + len, blocklen - off - len);
 }
 
 /* tree utilities */
@@ -305,7 +306,7 @@ char *slice_insert(SliceTable *st, char *target, size_t offset,
 		new->next = st->blocks;
 		st->blocks = new;
 	} else
-		block_insert(target, offset, data, len);
+		block_insert(target, *tspan, offset, data, len);
 	*tspan += len;
 	return target;
 }
@@ -760,7 +761,7 @@ static long delete_leaf(SliceTable *st, struct node *leaf,
 		*(size_t *)ctx = count_lfs(leaf->child[i] + pos, len);
 		// inplace deletion, no splitting/underflowing here
 		if(oldspan <= HIGH_WATER) {
-			block_delete(olddata, pos, len);
+			block_delete(olddata, oldspan, pos, len);
 			leaf->spans[i] -= len;
 			return delta;
 		}
@@ -775,7 +776,7 @@ static long delete_leaf(SliceTable *st, struct node *leaf,
 
 		leaf->spans[i] = pos; // truncate slice
 		// truncation might have resulted in a small block
-		if(leaf->spans[i] <= HIGH_WATER) {
+		if(pos <= HIGH_WATER) {
 			char *new = malloc(HIGH_WATER);
 			memcpy(new, olddata, pos);
 			leaf->child[i] = new;
@@ -837,7 +838,7 @@ static long delete_leaf(SliceTable *st, struct node *leaf,
 			lfs += count_lfs(*se, len);
 			// delete prefix of end
 			if(leaf->spans[end] <= HIGH_WATER) {
-				block_delete(*se, 0, len);
+				block_delete(*se, leaf->spans[end], 0, len);
 				leaf->spans[end] -= len;
 			} else { // cannot become 0 as the loop would've continued
 				leaf->spans[end] -= len;
@@ -939,13 +940,14 @@ struct stackentry {
 
 #define STACKSIZE 3
 struct sliceiter {
-	char *data;
+	size_t span; // span of current slice
 	size_t off; // offset into slice
+	char *data;
+	size_t pos; // absolute position
 	struct node *leaf;
 	int node_offset;
 	struct stackentry stack[STACKSIZE];
 	SliceTable *st;
-	size_t pos; // absolute position
 };
 
 SliceIter *st_iter_to(SliceIter *it, size_t pos)
@@ -979,6 +981,7 @@ SliceIter *st_iter_to(SliceIter *it, size_t pos)
 		pos -= leaf->spans[i++];
 
 	it->node_offset = i;
+	it->span = leaf->spans[i];
 	it->off = pos;
 	st_dbg("iter_to at leaf: i: %d, pos %zd\n", i, pos);
 
@@ -1017,7 +1020,7 @@ size_t st_iter_pos(const SliceIter *it) { return it->pos; }
 
 static bool iter_off_end(const SliceIter *it)
 {
-	return it->off == it->leaf->spans[it->node_offset];
+	return it->off == it->span;
 }
 
 bool st_iter_next_chunk(SliceIter *it)
@@ -1028,6 +1031,7 @@ bool st_iter_next_chunk(SliceIter *it)
 	// fast path: same leaf
 	if(i < B-1 && leaf->spans[i+1] != ULONG_MAX) {
 		it->node_offset++;
+		it->span = leaf->spans[i+1];
 		it->off = 0;
 		it->data = leaf->child[i+1];
 		return true;
@@ -1048,6 +1052,7 @@ bool st_iter_next_chunk(SliceIter *it)
 		int leaf_idx = it->stack[0].idx;
 		it->leaf = (struct node *)it->stack[0].node->child[leaf_idx];
 		it->node_offset = 0;
+		it->span = it->leaf->spans[0];
 		it->off = 0;
 		it->data = it->leaf->child[0];
 		return true;
@@ -1066,7 +1071,8 @@ bool st_iter_prev_chunk(SliceIter *it)
 	// fast path: same leaf
 	if(i > 0) {
 		it->node_offset--;
-		it->off = it->leaf->spans[i-1] - 1;
+		it->span = it->leaf->spans[i-1];
+		it->off = it->span - 1;
 		it->data = (char *)leaf->child[i-1] + it->off;
 		return true;
 	}
@@ -1089,7 +1095,8 @@ bool st_iter_prev_chunk(SliceIter *it)
 		int fill = node_fill(leaf, 0);
 		it->leaf = leaf;
 		it->node_offset = fill - 1;
-		it->off = leaf->spans[it->node_offset] - 1;
+		it->span = leaf->spans[fill-1];
+		it->off = it->span - 1;
 		it->data = (char *)leaf->child[fill-1] + it->off;
 		return true;
 	} else { // if stack was insufficient, reinitialize
@@ -1101,7 +1108,7 @@ bool st_iter_prev_chunk(SliceIter *it)
 
 char *st_iter_chunk(const SliceIter *it, size_t *len)
 {
-	*len = it->leaf->spans[it->node_offset];
+	*len = it->span;
 	return it->data - it->off;
 }
 
@@ -1115,7 +1122,7 @@ char st_iter_next_byte(SliceIter *it, size_t count)
 	if(iter_off_end(it))
 		return -1;
 
-	size_t left = it->leaf->spans[it->node_offset] - it->off;
+	size_t left = it->span - it->off;
 	if(count < left) {
 		it->off += count;
 		it->data += count;
