@@ -9,15 +9,15 @@ int main(int argc, char **argv)
 {
 #if 1
 	if(argc < 4) {
-		printf("usage <filename> <search pattern> <replacement pattern>");
+		fprintf(stderr, "usage <filename> <search pattern> <replacement pattern>\n");
 		return 1;
 	}
 	const char *pattern = argv[2];
 	const char *replace = argv[3];
 	size_t len = strlen(pattern);
 	size_t replacelen = strlen(replace);
-	assert(len > 1);
 	SliceTable *st = st_new_from_file(argv[1]);
+	SliceTable *clone = st_clone(st);
 	SliceIter *it = st_iter_new(st, 0);
 	size_t i = 0;
 	char c;
@@ -50,12 +50,13 @@ int main(int argc, char **argv)
 		i++;
 	}
 	clock_gettime(CLOCK_REALTIME, &after);
-	st_dump(st, stdout);
+	//st_dump(st, stdout);
 	fprintf(stderr, "found replaced %d matches in %f ms\n", matches,
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
 			(after.tv_sec - before.tv_sec) * 1000);
 	free(matchpos);
 	st_iter_free(it);
+	st_free(clone);
 	st_free(st);
 #else
 #ifndef NDEBUG
