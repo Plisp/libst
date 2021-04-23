@@ -5,6 +5,7 @@
 
 #include "st.h"
 
+// TODO use ropey's batch replacement approach
 int main(int argc, char **argv)
 {
 #if 1

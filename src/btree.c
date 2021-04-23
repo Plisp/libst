@@ -20,7 +20,7 @@
 
 #include "st.h"
 
-#define HIGH_WATER (1<<12)
+#define HIGH_WATER (1<<14)
 
 #if __x86_64__
 	#define USETAGS
@@ -41,7 +41,7 @@ struct block {
 	struct block *next;
 };
 
-#define NODESIZE (256 - sizeof(atomic_int)) // close enough
+#define NODESIZE (128 - sizeof(atomic_int)) // close enough
 #define PER_B (sizeof(size_t) + sizeof(void *))
 #define B ((int)(NODESIZE / PER_B))
 struct node {
@@ -811,6 +811,13 @@ static long delete_leaf(SliceTable *st, struct node *leaf,
 #endif
 		}
 		int newfill = delete_within_slice(st, leaf, fill, i, right_span, right);
+		// untag and copy, could not have shifted backwards unless merged
+		if(pos <= HIGH_WATER && (uintptr_t)leaf->child[i] & 1ULL<<63) {
+			char *new = malloc(HIGH_WATER);
+			memcpy(new, (void *)((uintptr_t)leaf->child[i] & ~(1ULL<<63)),
+					leaf->spans[i]);
+			leaf->child[i] = new;
+		}
 		if(newfill > B) {
 			assert(newfill == B+1);
 			st_dbg("deletion within piece: overflow\n");
