@@ -37,6 +37,7 @@ void st_dump(const SliceTable *st, FILE *file);
 void st_print_struct_sizes(void);
 bool st_to_dot(const SliceTable *st, const char *path);
 int st_depth(const SliceTable *st);
+size_t st_node_count(const SliceTable *st);
 
 /* read-only iterator */
 

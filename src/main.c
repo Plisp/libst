@@ -9,6 +9,7 @@
 int main(int argc, char **argv)
 {
 #if 1
+	st_print_struct_sizes();
 	if(argc < 4) {
 		fprintf(stderr, "usage <filename> <search pattern> <replacement pattern>\n");
 		return 1;
@@ -17,7 +18,15 @@ int main(int argc, char **argv)
 	const char *replace = argv[3];
 	size_t len = strlen(pattern);
 	size_t replacelen = strlen(replace);
+
+	struct timespec before, after;
+	clock_gettime(CLOCK_REALTIME, &before);
 	SliceTable *st = st_new_from_file(argv[1]);
+	clock_gettime(CLOCK_REALTIME, &after);
+	printf("load time: %f ms\n",
+			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
+			(after.tv_sec - before.tv_sec) * 1000);
+
 	SliceTable *clone = st_clone(st);
 	SliceIter *it = st_iter_new(st, 0);
 	size_t i = 0;
@@ -25,7 +34,6 @@ int main(int argc, char **argv)
 	bool *matchpos = calloc(len, sizeof(bool));
 	int matches = 0;
 
-	struct timespec before, after;
 	clock_gettime(CLOCK_REALTIME, &before);
 	// a basic search, comparable to ropey's search_and_replace.rs
 	while((c = st_iter_next_byte(it, 1)) != -1) {
@@ -51,10 +59,13 @@ int main(int argc, char **argv)
 		i++;
 	}
 	clock_gettime(CLOCK_REALTIME, &after);
-	//st_dump(st, stdout);
-	fprintf(stderr, "found replaced %d matches in %f ms\n", matches,
+	//st_pprint(st);
+	fprintf(stderr, "found/replaced %d matches in %f ms,"
+			"leaves: %zd, size %zd, depth %d\n",
+			matches,
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
-			(after.tv_sec - before.tv_sec) * 1000);
+			(after.tv_sec - before.tv_sec) * 1000,
+			st_node_count(st), st_size(st), st_depth(st));
 	free(matchpos);
 	st_iter_free(it);
 	st_free(clone);

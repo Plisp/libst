@@ -42,15 +42,9 @@ struct slicetable {
 
 /* simple */
 
-size_t st_size(const SliceTable *st)
-{
-	return st->bytes;
-}
-
-int st_depth(const SliceTable *st)
-{
-	return st->size;
-}
+size_t st_size(const SliceTable *st) { return st->bytes; }
+int st_depth(const SliceTable *st) { return st->size; }
+size_t st_node_count(const SliceTable *st) { return st->size; }
 
 static size_t count_lfs(const char *s, size_t len)
 {

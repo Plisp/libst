@@ -20,7 +20,8 @@
 
 #include "st.h"
 
-#define HIGH_WATER (1<<14)
+#define HIGH_WATER (1<<15)
+#define LOW_WATER (HIGH_WATER/2)
 
 #if __x86_64__
 	#define USETAGS
@@ -92,14 +93,12 @@ static void drop_block(struct block *block)
 static void block_insert(char *block, size_t blocklen, size_t off,
 						const char *data, size_t len)
 {
-	assert(off <= HIGH_WATER);
 	memmove(block + off + len, block + off, blocklen - off);
 	memcpy(block + off, data, len);
 }
 
 static void block_delete(char *block, size_t blocklen, size_t off, size_t len)
 {
-	assert(off + len <= HIGH_WATER);
 	memmove(block + off, block + off + len, blocklen - off - len);
 }
 
@@ -213,6 +212,21 @@ static void ensure_node_editable(struct node **nodeptr, int level)
 
 int st_depth(const SliceTable *st) { return st->levels - 1; }
 
+size_t node_count(const struct node *node, int level)
+{
+	if(level == 1)
+		return 1;
+	size_t count = 0;
+	for(int i = 0; i < node_fill(node, 0); i++)
+		count += node_count(node->child[i], level-1);
+	return count;
+}
+
+size_t st_node_count(const SliceTable *st)
+{
+	return node_count(st->root, st->levels);
+}
+
 size_t st_size(const SliceTable *st)
 {
 	return node_sum(st->root, node_fill(st->root, 0));
@@ -236,7 +250,7 @@ SliceTable *st_new_from_file(const char *path)
 	if(!len)
 		return st_new(); // mmap cannot handle 0-length mappings
 
-	enum blktype type;
+	SliceTable *st = malloc(sizeof *st);
 	void *data;
 	if(len <= HIGH_WATER) {
 		data = malloc(HIGH_WATER);
@@ -246,27 +260,22 @@ SliceTable *st_new_from_file(const char *path)
 			free(data);
 			return NULL;
 		}
-		type = HEAP;
+		st->blocks = NULL;
 	} else {
 		data = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0);
 		close(fd);
 		if(data == MAP_FAILED)
 			return NULL;
-		type = MMAP;
+		struct block *init = malloc(sizeof(struct block));
+		*init = (struct block){
+			.type = MMAP, .refc = 1, .data = data, .len = len, .next = NULL
+		};
+		st->blocks = init;
 	}
-
-	SliceTable *st = malloc(sizeof *st);
-	struct block *init = malloc(sizeof(struct block));
-	*init = (struct block){
-		.type = type, .refc = 1, .data = data, .len = len, .next = NULL
-	};
-
 	struct node *leaf = new_node();
 	leaf->spans[0] = len;
 	leaf->child[0] = data;
 	st->root = (struct node *)leaf;
-	st->blocks = init;
-	st_dbg("allocating st->blocks %p\n", st->blocks);
 	st->levels = 1;
 	return st;
 }
@@ -274,7 +283,6 @@ SliceTable *st_new_from_file(const char *path)
 void st_free(SliceTable *st)
 {
 	drop_node(st->root, st->levels);
-	st_dbg("freeing st->blocks %p\n", st->blocks);
 	if(st->blocks)
 		drop_block(st->blocks);
 	free(st);
@@ -293,52 +301,54 @@ SliceTable *st_clone(const SliceTable *st)
 
 /* utilities */
 
-// may *ONLY* be used for inserting in small slices
-char *slice_insert(SliceTable *st, char *target, size_t offset,
-				const char *data, size_t len, size_t *tspan)
+struct block *slice_insert(void **target_ptr, size_t offset,
+						const char *data, size_t len, size_t *tspan)
 {
+	size_t oldspan = *tspan;
+	char *target = *target_ptr;
 #ifdef USETAGS
 	// if target is tagged as LARGE, untag and copy it
 	if((uintptr_t)target & 1ULL<<63) {
 		char *new = malloc(HIGH_WATER);
-		memcpy(new, (void *)((uintptr_t)target & ~(1ULL<<63)), *tspan);
-		target = new;
+		memcpy(new, (void *)((uintptr_t)target & ~(1ULL<<63)), oldspan);
+		*target_ptr = target = new;
 	}
-	// untag data
+	// untag data for copying
 	if((uintptr_t)data & 1ULL<<63) {
 		data = (char *)((uintptr_t)data & ~(1ULL<<63));
 	}
 #endif
-	if(*tspan + len > HIGH_WATER) {
+	size_t newspan = oldspan + len;
+	*tspan = newspan;
+
+	if(newspan <= HIGH_WATER) {
+		block_insert(target, oldspan, offset, data, len);
+		return NULL;
+	} else {
 		struct block *new = malloc(sizeof *new);
-		new->len = *tspan + len;
+		new->len = newspan;
 		target = realloc(target, new->len);
 		new->data = target;
-		memmove(target + offset + len, &target[offset], *tspan - offset);
+		memmove(target + offset + len, &target[offset], oldspan - offset);
 		memcpy(target + offset, data, len);
 		new->type = HEAP;
 		// we have exclusive access here
 		atomic_store_explicit(&new->refc, 1, memory_order_relaxed);
-		// no change to reference count, as we're still pointing to it
-		new->next = st->blocks;
-		st->blocks = new;
-	} else
-		block_insert(target, *tspan, offset, data, len);
-	*tspan += len;
-	return target;
+		return new;
+	}
 }
 
-int merge_slices(SliceTable *st, size_t spans[static 5], char *data[static 5],
+int merge_slices(size_t spans[static 5], char *data[static 5],
 				int fill)
 {
 	int i = 1;
 	while(i < fill) {
-		if(spans[i] > HIGH_WATER)
+		if(spans[i] > LOW_WATER)
 			i += 2; // X|L__ to XL_|_
-		else if(spans[i-1] <= HIGH_WATER) {
+		else if(spans[i-1] <= LOW_WATER) {
 			// both are smaller S|S, i doesn't move
-			data[i-1] = slice_insert(st, data[i-1], spans[i-1],
-									data[i], spans[i], &spans[i-1]);
+			// We only worry about underfull nodes, so no need to handle split
+			slice_insert(&data[i-1], spans[i-1], data[i], spans[i], &spans[i-1]);
 #ifdef USETAGS
 			// if not tagged as LARGE, free
 			if(!((uintptr_t)data[i] & 1ULL<<63)) {
@@ -394,15 +404,14 @@ size_t rebalance_node(struct node * restrict i, struct node * restrict j,
 	return delta;
 }
 
-size_t merge_boundary(SliceTable *st, struct node **lptr, int lfill)
+size_t merge_boundary(struct node **lptr, int lfill)
 {
 	struct node *l = lptr[0];
 	struct node *r = lptr[1];
-	// merge the boundary slices if they're both small
-	if(l->spans[lfill-1] <= HIGH_WATER && r->spans[0] <= HIGH_WATER) {
+	// merge the boundary slices if they're both underfull
+	if(l->spans[lfill-1] <= LOW_WATER && r->spans[0] <= LOW_WATER) {
 		size_t delta = l->spans[lfill-1];
-		r->child[0] = slice_insert(st, r->child[0], 0, l->child[lfill-1],
-								delta, &r->spans[0]);
+		slice_insert(&r->child[0], 0, l->child[lfill-1], delta, &r->spans[0]);
 		free(l->child[lfill-1]);
 		node_clrslots(l, lfill - 1, lfill);
 		return delta;
@@ -423,8 +432,7 @@ void node_remove(struct node *root, int fill, int j)
 
 /* the complex stuff */
 
-typedef long (*leaf_case)(SliceTable *st, struct node *leaf,
-						size_t pos, long *span,
+typedef long (*leaf_case)(struct node *leaf, size_t pos, long *span,
 						struct node **split, size_t *splitsize, void *ctx);
 
 static long edit_recurse(SliceTable *st, int level, struct node *root,
@@ -433,7 +441,7 @@ static long edit_recurse(SliceTable *st, int level, struct node *root,
 						struct node **split, size_t *splitsize)
 {
 	if(level == 1)
-		return base_case(st,(void *)root,pos,span,(void *)split,splitsize,ctx);
+		return base_case((void*)root, pos, span, (void*)split, splitsize, ctx);
 	else { // level > 1: node node recursion
 		struct node *childsplit = NULL;
 		size_t childsize = 0;
@@ -482,11 +490,11 @@ static long edit_recurse(SliceTable *st, int level, struct node *root,
 					if(level-1 == 1) {
 						size_t res;
 						if(i < j) {
-							if(res = merge_boundary(st, (void*)&root->child[i],
+							if(res = merge_boundary((void*)&root->child[i],
 													childsize))
 								childsize--, shifted -= res;
 						} else // j < i
-							if(res = merge_boundary(st, (void*)&root->child[j],
+							if(res = merge_boundary((void*)&root->child[j],
 													jfill))
 								jfill--, shifted += res;
 					}
@@ -511,8 +519,7 @@ static long edit_recurse(SliceTable *st, int level, struct node *root,
 
 /* insertion */
 
-// handle insertion within LARGE slices
-static long insert_within_slice(SliceTable *st, struct node *leaf, int fill,
+static long insert_within_slice(struct node *leaf, int fill,
 							int i, size_t off, char *new, size_t newlen,
 							struct node **split, size_t *splitsize)
 {
@@ -529,7 +536,7 @@ static long insert_within_slice(SliceTable *st, struct node *leaf, int fill,
 		right = *left + off;
 
 	assert(off > 0); // should be handled by general case
-	// demote left fragment if necessary
+	// demote left slice if necessary
 	if(off <= HIGH_WATER) {
 		char *new = malloc(HIGH_WATER);
 		memcpy(new, *left, off);
@@ -555,7 +562,7 @@ static long insert_within_slice(SliceTable *st, struct node *leaf, int fill,
 		tmpspans[tmpfill] = leaf->spans[i+1];
 		tmp[tmpfill++] = leaf->child[i+1];
 	}
-	int newfill = merge_slices(st, tmpspans, tmp, tmpfill);
+	int newfill = merge_slices(tmpspans, tmp, tmpfill);
 	int delta = tmpfill - newfill;
 	assert(delta <= 3); // [S][S1|Si|S2][S] -> [L][S], S1+S2 > HIGH_WATER
 	st_dbg("merged %d nodes\n", delta);
@@ -613,10 +620,10 @@ static long insert_within_slice(SliceTable *st, struct node *leaf, int fill,
 struct insert_ctx {
 	size_t lfs;
 	const char *data;
+	SliceTable *st; // for attaching new blocks
 };
 
-static long insert_leaf(SliceTable *st, struct node *leaf,
-						size_t pos, long *span,
+static long insert_leaf(struct node *leaf, size_t pos, long *span,
 						struct node **split, size_t *splitsize, void *ctx)
 {
 	int i = node_offset(leaf, &pos);
@@ -627,22 +634,26 @@ static long insert_leaf(SliceTable *st, struct node *leaf,
 	long delta = len;
 	bool at_bound = (pos == leaf->spans[i]);
 	const char *data = ((struct insert_ctx *)ctx)->data;
+	SliceTable *st = ((struct insert_ctx *)ctx)->st;
 	// we scan the data here for better locality
 	((struct insert_ctx *)ctx)->lfs = count_lfs(data, len);
 	// if we are inserting at 0, pos will be 0
-	if(pos == 0 && leaf->spans[0] <= HIGH_WATER) {
+	if(pos == 0 && leaf->spans[0]+len <= HIGH_WATER) {
 		assert(i == 0);
-		leaf->child[0] = slice_insert(st, (char *)leaf->child[0], 0,
-									data, len, &leaf->spans[0]);
+		if(leaf->spans[0] == ULONG_MAX) { // empty document insertion
+			leaf->spans[0] = len;
+			leaf->child[0] = malloc(HIGH_WATER);
+			memcpy(leaf->child[0], data, len);
+		} else
+			slice_insert(&leaf->child[0], 0, data, len, &leaf->spans[0]);
 	}
-	else if(leaf->spans[i] <= HIGH_WATER) {
-		leaf->child[i] = slice_insert(st, (char *)leaf->child[i], pos,
-									data, len, &leaf->spans[i]);
+	else if(leaf->spans[i]+len <= HIGH_WATER) {
+		slice_insert(&leaf->child[i], pos, data, len, &leaf->spans[i]);
 	} // try start of i+1
-	else if(at_bound && (i < fill-1) && leaf->spans[i+1] <= HIGH_WATER) {
-		leaf->child[i+1] = slice_insert(st, (char *)leaf->child[i+1], 0,
-										data, len, &leaf->spans[i+1]);
-	} else { // make a modifiable copy
+	else if(at_bound && (i < fill-1) && leaf->spans[i+1]+len <= HIGH_WATER) {
+		slice_insert(&leaf->child[i+1], 0, data, len, &leaf->spans[i+1]);
+	} // all has failed, we must make a copy and deal with splitting
+	else {
 		char *copy;
 		if(len > HIGH_WATER) {
 			copy = malloc(len);
@@ -677,7 +688,7 @@ static long insert_leaf(SliceTable *st, struct node *leaf,
 			leaf->spans[i] = len;
 			leaf->child[i] = copy;
 		} else
-			return insert_within_slice(st, leaf, fill, i, pos, copy, len,
+			return insert_within_slice(leaf, fill, i, pos, copy, len,
 									split, splitsize);
 	}
 	return delta;
@@ -692,7 +703,7 @@ size_t st_insert(SliceTable *st, size_t pos, const char *data, size_t len)
 	struct node *split = NULL;
 	size_t splitsize;
 	long span = (long)len;
-	struct insert_ctx ctx = { .data = data };
+	struct insert_ctx ctx = { .data = data, .st = st };
 
 	ensure_node_editable(&st->root, st->levels);
 	edit_recurse(st, st->levels, st->root, pos, &span, &insert_leaf, &ctx,
@@ -719,7 +730,7 @@ size_t st_insert(SliceTable *st, size_t pos, const char *data, size_t len)
 
 /* deletion */
 
-static int delete_within_slice(SliceTable *st, struct node *leaf, int fill,
+static int delete_within_slice(struct node *leaf, int fill,
 								int i, size_t new_right_span, char *new_right)
 {
 	size_t *slice_span = &leaf->spans[i];
@@ -743,7 +754,7 @@ static int delete_within_slice(SliceTable *st, struct node *leaf, int fill,
 	// clearly we can create at most one extra slice
 	// unmergeable [L]*[L] -> [L]*[X]|[L] <=> full leaf +1 overflow
 	// delta == 0 means +1 for new_right being inserted
-	int newfill = merge_slices(st, tmpspans, tmp, tmpfill);
+	int newfill = merge_slices(tmpspans, tmp, tmpfill);
 	int delta = tmpfill - newfill;
 	assert(delta <= 3); // [S][S|S][S] -> [S]
 	int realfill = fill - (delta-1);
@@ -766,8 +777,7 @@ static int delete_within_slice(SliceTable *st, struct node *leaf, int fill,
 }
 
 // span is negative to indicate deltas for partial deletions
-static long delete_leaf(SliceTable *st, struct node *leaf,
-						size_t pos, long *span,
+static long delete_leaf(struct node *leaf, size_t pos, long *span,
 						struct node **split, size_t *splitsize, void *ctx)
 {
 	int i = node_offset(leaf, &pos);
@@ -783,26 +793,27 @@ static long delete_leaf(SliceTable *st, struct node *leaf,
 		char *olddata = leaf->child[i];
 		size_t delta = -len;
 		*(size_t *)ctx = count_lfs(leaf->child[i] + pos, len);
-		// inplace deletion, no splitting/underflowing here
-		if(oldspan <= HIGH_WATER) {
+		// inplace deletion
+		if(oldspan <= LOW_WATER) {
 			block_delete(olddata, oldspan, pos, len);
 			leaf->spans[i] -= len;
 			return delta;
 		}
 		size_t right_span = oldspan - pos - len;
 		char *right;
-		// copy data for right fragment
+		// copy right slice's data
 		if(right_span <= HIGH_WATER) {
 			right = malloc(HIGH_WATER);
 			memcpy(right, olddata + pos + len, right_span);
 		} else
 			right = olddata + pos + len;
-
-		leaf->spans[i] = pos; // truncate slice
+		// truncate slice
+		leaf->spans[i] = pos;
 		// truncation might have resulted in a small block
-		if(pos <= HIGH_WATER) {
+		bool truncated_large = oldspan > HIGH_WATER && pos <= HIGH_WATER;
+		if(truncated_large) {
 #ifdef USETAGS
-			// assume userspace 0 bits, use high bit
+			// assume userspace 0 bits, use high bit tag
 			leaf->child[i] = (void *)((uintptr_t)leaf->child[i] | 1ULL<<63);
 #else
 			char *new = malloc(HIGH_WATER);
@@ -810,14 +821,17 @@ static long delete_leaf(SliceTable *st, struct node *leaf,
 			leaf->child[i] = new;
 #endif
 		}
-		int newfill = delete_within_slice(st, leaf, fill, i, right_span, right);
-		// untag and copy, could not have shifted backwards unless merged
-		if(pos <= HIGH_WATER && (uintptr_t)leaf->child[i] & 1ULL<<63) {
+		int newfill = delete_within_slice(leaf, fill, i, right_span, right);
+#ifdef USETAGS
+		// untag and copy if not done already
+		// leaf(i) could not have shifted backwards unless it was merged
+		if(truncated_large && ((uintptr_t)leaf->child[i] & 1ULL<<63)) {
 			char *new = malloc(HIGH_WATER);
 			memcpy(new, (void *)((uintptr_t)leaf->child[i] & ~(1ULL<<63)),
 					leaf->spans[i]);
 			leaf->child[i] = new;
 		}
+#endif
 		if(newfill > B) {
 			assert(newfill == B+1);
 			st_dbg("deletion within piece: overflow\n");
@@ -881,7 +895,6 @@ static long delete_leaf(SliceTable *st, struct node *leaf,
 				// was large, now small
 				if(leaf->spans[end] <= HIGH_WATER) {
 					char *new = malloc(HIGH_WATER);
-					;
 					memcpy(new, leaf->child[end], leaf->spans[end]);
 					leaf->child[end] = new;
 				} else
@@ -903,7 +916,7 @@ static long delete_leaf(SliceTable *st, struct node *leaf,
 		memcpy(tmpspans, &leaf->spans[start], tmpfill * sizeof(size_t));
 		memcpy(tmp, &leaf->child[start], tmpfill * sizeof(char *));
 		// merge and copy in
-		int newfill = merge_slices(st, tmpspans, tmp, tmpfill);
+		int newfill = merge_slices(tmpspans, tmp, tmpfill);
 		st_dbg("merged %d nodes\n", tmpfill - newfill);
 		fill -= tmpfill - newfill;
 		memcpy(&leaf->spans[start], tmpspans, newfill * sizeof(size_t));
@@ -1232,7 +1245,7 @@ static void print_node(const struct node *node, int level)
 		}
 	}
 	it--;
-	sprintf(it, "]");
+	sprintf(it, "]\e[0m");
 	fprintf(stderr, "%s ", out);
 }
 
@@ -1255,7 +1268,7 @@ static bool check_recurse(struct node *root, int height, int level)
 				print_node(root, 1);
 				return false;
 			}
-			issmall = (span <= HIGH_WATER);
+			issmall = (span <= LOW_WATER);
 			if(last_issmall && issmall) {
 				st_dbg("adjacent slice size violation in slot %d of ", i);
 				print_node(root, 1);

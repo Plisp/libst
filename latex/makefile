@@ -1,2 +1,4 @@
 document:
-	pdflatex -shell-escape piecetable.ltx
+	pdflatex -shell-escape slicetable.ltx
+	bibtex slicetable
+	pdflatex -shell-escape slicetable.ltx
