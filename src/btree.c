@@ -20,7 +20,7 @@
 
 #include "st.h"
 
-#define HIGH_WATER (1<<15)
+#define HIGH_WATER (1<<3)
 #define LOW_WATER (HIGH_WATER/2)
 
 #if __x86_64__
@@ -343,10 +343,7 @@ int merge_slices(size_t spans[static 5], char *data[static 5],
 {
 	int i = 1;
 	while(i < fill) {
-		if(spans[i] > LOW_WATER)
-			i += 2; // X|L__ to XL_|_
-		else if(spans[i-1] <= LOW_WATER) {
-			// both are smaller S|S, i doesn't move
+		if(spans[i] + spans[i-1] <= HIGH_WATER) {
 			// We only worry about underfull nodes, so no need to handle split
 			slice_insert(&data[i-1], spans[i-1], data[i], spans[i], &spans[i-1]);
 #ifdef USETAGS
@@ -360,8 +357,8 @@ int merge_slices(size_t spans[static 5], char *data[static 5],
 			memmove(&spans[i], &spans[i+1], (fill - (i+1)) * sizeof(size_t));
 			memmove(&data[i], &data[i+1], (fill - (i+1)) * sizeof(char *));
 			fill--;
-		} else
-			i++; // L|S_ -> LS|_
+		} else // couldn't merge, proceed to next pair
+			i++;
 	}
 	return fill;
 }
@@ -408,8 +405,8 @@ size_t merge_boundary(struct node **lptr, int lfill)
 {
 	struct node *l = lptr[0];
 	struct node *r = lptr[1];
-	// merge the boundary slices if they're both underfull
-	if(l->spans[lfill-1] <= LOW_WATER && r->spans[0] <= LOW_WATER) {
+	// merge the boundary slices if possible
+	if(l->spans[lfill-1] + r->spans[0] <= HIGH_WATER) {
 		size_t delta = l->spans[lfill-1];
 		slice_insert(&r->child[0], 0, l->child[lfill-1], delta, &r->spans[0]);
 		free(l->child[lfill-1]);
@@ -482,6 +479,7 @@ static long edit_recurse(SliceTable *st, int level, struct node *root,
 				int j = i > 0 ? i-1 : i+1;
 				int fill = node_fill(root, i);
 				long shifted = 0;
+				// 
 				if(childsize == ULONG_MAX)
 					root->spans[j = i] = 0; // mark j = i as deleted
 				else {
@@ -523,7 +521,6 @@ static long insert_within_slice(struct node *leaf, int fill,
 							int i, size_t off, char *new, size_t newlen,
 							struct node **split, size_t *splitsize)
 {
-	assert(leaf->spans[i] > HIGH_WATER);
 	size_t *left_span = &leaf->spans[i];
 	char **left = (char **)&leaf->child[i];
 	size_t right_span = *left_span - off;
@@ -663,7 +660,7 @@ static long insert_leaf(struct node *leaf, size_t pos, long *span,
 			new->len = len;
 			atomic_store_explicit(&new->refc, 1, memory_order_relaxed);
 			new->next = st->blocks;
-			st->blocks->next = new; // still pointing, no refc update
+			st->blocks = new; // still pointing, no refc update
 		} else {
 			copy = malloc(HIGH_WATER);
 		}
@@ -711,7 +708,9 @@ size_t st_insert(SliceTable *st, size_t pos, const char *data, size_t len)
 	// handle root underflow
 	if(st->levels > 1 && node_fill(st->root, 0) == 1) {
 		st_dbg("handling root underflow\n");
+		struct node *oldroot = st->root;
 		st->root = st->root->child[0];
+		free(oldroot);
 		st->levels--;
 	}
 	// handle root split
@@ -793,12 +792,6 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 		char *olddata = leaf->child[i];
 		size_t delta = -len;
 		*(size_t *)ctx = count_lfs(leaf->child[i] + pos, len);
-		// inplace deletion
-		if(oldspan <= LOW_WATER) {
-			block_delete(olddata, oldspan, pos, len);
-			leaf->spans[i] -= len;
-			return delta;
-		}
 		size_t right_span = oldspan - pos - len;
 		char *right;
 		// copy right slice's data
@@ -863,7 +856,7 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 			len -= leaf->spans[i] - pos; // no. deleted characters remaining
 			char **si = (char **)&leaf->child[i];
 			lfs += count_lfs(*si + pos, leaf->spans[i] - pos);
-			// if the span was large, consider reallocating after truncation
+			// may need to reallocate after truncation
 			if(leaf->spans[i] > HIGH_WATER && pos <= HIGH_WATER) {
 				char *new = malloc(HIGH_WATER);
 				memcpy(new, leaf->child[i], pos);
@@ -931,7 +924,7 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 		if(fill < B/2 + (B&1))
 			*splitsize = fill ? fill : ULONG_MAX; // ULONG_MAX indicates 0 size
 		*(size_t *)ctx = lfs;
-		return *span += len; // |requested-deleted| = |change|
+		return *span += len; // |requested - deleted| = |change|
 	}
 }
 
@@ -960,7 +953,9 @@ size_t st_delete(SliceTable *st, size_t pos, size_t len)
 		// handle underflow
 		if(st->levels > 1 && node_fill(st->root, 0) == 1) {
 			st_dbg("handling root underflow\n");
+			struct node *oldroot = st->root;
 			st->root = st->root->child[0];
+			free(oldroot);
 			st->levels--;
 		}
 		// handle root split
@@ -1260,7 +1255,7 @@ static bool check_recurse(struct node *root, int height, int level)
 			return false;
 		}
 
-		bool last_issmall = false, issmall;
+		int lastsize = HIGH_WATER, size;
 		for(int i = 0; i < fill; i++) {
 			size_t span = root->spans[i];
 			if(span == 0) {
@@ -1268,13 +1263,13 @@ static bool check_recurse(struct node *root, int height, int level)
 				print_node(root, 1);
 				return false;
 			}
-			issmall = (span <= LOW_WATER);
-			if(last_issmall && issmall) {
+			size = span;
+			if(lastsize + size <= HIGH_WATER) {
 				st_dbg("adjacent slice size violation in slot %d of ", i);
 				print_node(root, 1);
 				return false;
 			}
-			last_issmall = issmall;
+			lastsize = size;
 		}
 		return true;
 	} else {

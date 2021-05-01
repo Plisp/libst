@@ -9,7 +9,8 @@ int main(void)
 	SliceTable *st = st_new();
 	st_insert(st, 0, "x", 1);
 #ifdef AFL_DEBUG
-	FILE *sm = fopen("mini", "r");
+	FILE *sm = fopen("tests/case", "r");
+	//FILE *sm = fopen("mini", "r");
 #else
 	FILE *sm = stdin;
 #endif
@@ -40,5 +41,8 @@ int main(void)
 #endif
 		assert(st_check_invariants(st));
 	}
+#ifdef AFL_DEBUG
+	fclose(sm);
+#endif
 	st_free(st);
 }
