@@ -20,7 +20,7 @@
 
 #include "st.h"
 
-#define HIGH_WATER (1<<3)
+#define HIGH_WATER (1<<15)
 #define LOW_WATER (HIGH_WATER/2)
 
 #if __x86_64__
@@ -42,7 +42,7 @@ struct block {
 	struct block *next;
 };
 
-#define NODESIZE (128 - sizeof(atomic_int)) // close enough
+#define NODESIZE (256 - sizeof(atomic_int)) // close enough
 #define PER_B (sizeof(size_t) + sizeof(void *))
 #define B ((int)(NODESIZE / PER_B))
 struct node {
@@ -346,11 +346,9 @@ int merge_slices(size_t spans[static 5], char *data[static 5],
 		if(spans[i] + spans[i-1] <= HIGH_WATER) {
 			// We only worry about underfull nodes, so no need to handle split
 			slice_insert(&data[i-1], spans[i-1], data[i], spans[i], &spans[i-1]);
-#ifdef USETAGS
-			// if not tagged as LARGE, free
-			if(!((uintptr_t)data[i] & 1ULL<<63)) {
+#ifdef USETAGS // free if not tagged as large
+			if(!((uintptr_t)data[i] & 1ULL<<63))
 				free(data[i]);
-			}
 #else
 			free(data[i]);
 #endif
@@ -534,7 +532,7 @@ static long insert_within_slice(struct node *leaf, int fill,
 
 	assert(off > 0); // should be handled by general case
 	// demote left slice if necessary
-	if(off <= HIGH_WATER) {
+	if(leaf->spans[i] > HIGH_WATER && off <= HIGH_WATER) {
 		char *new = malloc(HIGH_WATER);
 		memcpy(new, *left, off);
 		*left = new;
