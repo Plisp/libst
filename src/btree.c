@@ -47,6 +47,7 @@ struct block {
 #define B ((int)(NODESIZE / PER_B))
 struct node {
 	atomic_int refc;
+	// TODO we could pack a int size field here. Is it worth it?
 	size_t spans[B];
 	void *child[B]; // in leaves (level 1), these are data pointers
 };
@@ -163,7 +164,7 @@ void drop_node(struct node *root, int level)
 					free(root->child[i]); // free small allocations
 			free(root);
 		}
-	} else // node node
+	} else // inner node
 		if(atomic_fetch_sub_explicit(&root->refc,1,memory_order_release)==1) {
 			atomic_thread_fence(memory_order_acquire);
 			for(int i = 0; i < node_fill(root, 0); i++)
@@ -191,6 +192,7 @@ static void ensure_node_editable(struct node **nodeptr, int level)
 		memcpy(copy, node, sizeof *copy);
 		atomic_store_explicit(&copy->refc, 1, memory_order_relaxed);
 		// in a leaf, copy small data blocks as we modify them inplace
+		// TODO, use a reference counted type to avoid unnecessary copying
 		int fill = node_fill(node, 0);
 		if(level == 1) {
 			for(int i = 0; i < fill; i++)
@@ -216,6 +218,7 @@ size_t node_count(const struct node *node, int level)
 {
 	if(level == 1)
 		return 1;
+
 	size_t count = 0;
 	for(int i = 0; i < node_fill(node, 0); i++)
 		count += node_count(node->child[i], level-1);
@@ -308,15 +311,14 @@ struct block *slice_insert(void **target_ptr, size_t offset,
 	char *target = *target_ptr;
 #ifdef USETAGS
 	// if target is tagged as LARGE, untag and copy it
-	if((uintptr_t)target & 1ULL<<63) {
+	if((uintptr_t)target >> 63) {
 		char *new = malloc(HIGH_WATER);
-		memcpy(new, (void *)((uintptr_t)target & ~(1ULL<<63)), oldspan);
+		memcpy(new, (void *)((uintptr_t)target <<1 >>1), oldspan);
 		*target_ptr = target = new;
 	}
 	// untag data for copying
-	if((uintptr_t)data & 1ULL<<63) {
-		data = (char *)((uintptr_t)data & ~(1ULL<<63));
-	}
+	if((uintptr_t)data >> 63)
+		data = (char *)((uintptr_t)data <<1 >>1);
 #endif
 	size_t newspan = oldspan + len;
 	*tspan = newspan;
@@ -347,7 +349,7 @@ int merge_slices(size_t spans[static 5], char *data[static 5],
 			// We only worry about underfull nodes, so no need to handle split
 			slice_insert(&data[i-1], spans[i-1], data[i], spans[i], &spans[i-1]);
 #ifdef USETAGS // free if not tagged as large
-			if(!((uintptr_t)data[i] & 1ULL<<63))
+			if(!((uintptr_t)data[i] >> 63))
 				free(data[i]);
 #else
 			free(data[i]);
@@ -418,7 +420,7 @@ size_t merge_boundary(struct node **lptr, int lfill)
 // root(j) **MUST** be editable and its slices must have been moved already
 void node_remove(struct node *root, int fill, int j)
 {
-	free(root->child[j]); // slices shifted over
+	free(root->child[j]); // slices shifted over, no need for full drop
 	size_t count = fill - (j+1);
 	memmove(&root->spans[j], &root->spans[j+1], count * sizeof(size_t));
 	memmove(&root->child[j], &root->child[j+1], count * sizeof(void *));
@@ -486,11 +488,11 @@ static long edit_recurse(SliceTable *st, int level, struct node *root,
 					if(level-1 == 1) {
 						size_t res;
 						if(i < j) {
-							if(res = merge_boundary((void*)&root->child[i],
+							if(res = merge_boundary((void *)&root->child[i],
 													childsize))
 								childsize--, shifted -= res;
 						} else // j < i
-							if(res = merge_boundary((void*)&root->child[j],
+							if(res = merge_boundary((void *)&root->child[j],
 													jfill))
 								jfill--, shifted += res;
 					}
@@ -816,9 +818,9 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 #ifdef USETAGS
 		// untag and copy if not done already
 		// leaf(i) could not have shifted backwards unless it was merged
-		if(truncated_large && ((uintptr_t)leaf->child[i] & 1ULL<<63)) {
+		if(truncated_large && ((uintptr_t)leaf->child[i] >> 63)) {
 			char *new = malloc(HIGH_WATER);
-			memcpy(new, (void *)((uintptr_t)leaf->child[i] & ~(1ULL<<63)),
+			memcpy(new, (void *)((uintptr_t)leaf->child[i] <<1 >>1),
 					leaf->spans[i]);
 			leaf->child[i] = new;
 		}

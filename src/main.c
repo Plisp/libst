@@ -59,8 +59,8 @@ int main(int argc, char **argv)
 		i++;
 	}
 	clock_gettime(CLOCK_REALTIME, &after);
-	//st_pprint(st);
-	fprintf(stderr, "found/replaced %d matches in %f ms,"
+	st_pprint(st);
+	fprintf(stderr, "found/replaced %d matches in %f ms, "
 			"leaves: %zd, size %zd, depth %d\n",
 			matches,
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
