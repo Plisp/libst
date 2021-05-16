@@ -261,14 +261,17 @@ SliceTable *st_new_from_file(const char *path)
 		// TODO
 		if(read(fd, data, len) != len) {
 			free(data);
+			free(st);
 			return NULL;
 		}
 		st->blocks = NULL;
 	} else {
 		data = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0);
 		close(fd);
-		if(data == MAP_FAILED)
+		if(data == MAP_FAILED) {
+			free(st);
 			return NULL;
+		}
 		struct block *init = malloc(sizeof(struct block));
 		*init = (struct block){
 			.type = MMAP, .refc = 1, .data = data, .len = len, .next = NULL
@@ -1144,7 +1147,10 @@ bool st_iter_prev_chunk(SliceIter *it)
 		it->data = (char *)leaf->child[fill-1] + it->off;
 		return true;
 	} else { // if stack was insufficient, reinitialize
-		st_iter_to(it, MAX(0, it->pos - it->off - 1));
+		if(it->pos == it->off) // we're on the first chunk already
+			st_iter_to(it, 0);
+		else
+			st_iter_to(it, it->pos - it->off - 1);
 		return it->pos > 0;
 	}
 	return true;
