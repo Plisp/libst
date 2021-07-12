@@ -10,6 +10,10 @@ opt:
 	#$(CC) array.c main.c -o array -O3 $(CFLAGS) -DNDEBUG
 	$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG -g
 
+lib:
+	$(CC) -c -fPIC btree.c -O3 $(CFLAGS) -DNDEBUG
+	$(CC) btree.o -shared -o libst.so
+
 afl:
 	afl-gcc btree.c fuzz.c -o fuzz -O3 $(CFLAGS)
 	afl-fuzz -i tests -o results ./fuzz

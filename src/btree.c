@@ -1114,13 +1114,13 @@ bool st_iter_prev_chunk(SliceIter *it)
 {
 	int i = it->node_offset;
 	struct node *leaf = it->leaf;
-	it->pos -= it->off + 1;
 	// fast path: same leaf
 	if(i > 0) {
 		it->node_offset--;
 		it->span = it->leaf->spans[i-1];
 		it->off = it->span - 1;
 		it->data = (char *)leaf->child[i-1] + it->off;
+		it->pos -= it->off + 1;
 		return true;
 	}
 	int si = 0;
@@ -1201,10 +1201,21 @@ char st_iter_prev_byte(SliceIter *it, size_t count)
 	return st_iter_prev_byte(it, count - left);
 }
 
+#include <wchar.h>
 #define MBERR ((size_t)-1)
 #define MBPART ((size_t)-2)
 
+
 long st_iter_cp(const SliceIter *it);
+/*
+{
+	mbstate_t mbs = {0};
+	wchar_t wch;
+	size_t ret = mbrtowc(&wch, buf, left, &mbs);
+	return wch;
+}
+*/
+
 long st_iter_next_cp(SliceIter *it, size_t count);
 long st_iter_prev_cp(SliceIter *it, size_t count);
 

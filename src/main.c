@@ -9,6 +9,12 @@
 int main(int argc, char **argv)
 {
 #if 1
+	SliceTable *st = st_new();
+	st_insert(st, 0, "test", 4);
+	SliceIter *it = st_iter_new(st, 0);
+	st_iter_prev_chunk(it);
+#else
+#if 1
 	st_print_struct_sizes();
 	if(argc < 4) {
 		fprintf(stderr, "usage <filename> <search pattern> <replacement pattern>\n");
@@ -161,6 +167,7 @@ int main(int argc, char **argv)
 			st_size(st), st_depth(st));
 	st_free(st);
 	st_free(clone);
+#endif
 #endif
 #endif
 }
