@@ -27,9 +27,8 @@ SliceTable *st_clone(const SliceTable *st);
 
 size_t st_size(const SliceTable *st);
 
-// both return inserted/deleted linefeed count as size_t
-size_t st_insert(SliceTable *st, size_t pos, const char *data, size_t len);
-size_t st_delete(SliceTable *st, size_t pos, size_t len);
+bool st_insert(SliceTable *st, size_t pos, const char *data, size_t len);
+bool st_delete(SliceTable *st, size_t pos, size_t len);
 
 bool st_check_invariants(const SliceTable *st);
 void st_pprint(const SliceTable *st);

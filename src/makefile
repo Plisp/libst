@@ -11,7 +11,7 @@ opt:
 	$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG -g
 
 lib:
-	$(CC) -c -fPIC btree.c -O3 $(CFLAGS) -DNDEBUG
+	$(CC) -c -fPIC btree.c $(CFLAGS)
 	$(CC) btree.o -shared -o libst.so
 
 afl:

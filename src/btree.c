@@ -64,14 +64,6 @@ struct slicetable {
 
 /* blocks */
 
-static size_t count_lfs(const char *s, size_t len) {
-	size_t count = 0;
-	for(size_t i = 0; i < len; i++)
-		if(*s++ == '\n')
-			count++;
-	return count;
-}
-
 static void free_block(struct block *block)
 {
 	switch(block->type) {
@@ -618,7 +610,6 @@ static long insert_within_slice(struct node *leaf, int fill,
 }
 
 struct insert_ctx {
-	size_t lfs;
 	const char *data;
 	SliceTable *st; // for attaching new blocks
 };
@@ -635,8 +626,6 @@ static long insert_leaf(struct node *leaf, size_t pos, long *span,
 	bool at_bound = (pos == leaf->spans[i]);
 	const char *data = ((struct insert_ctx *)ctx)->data;
 	SliceTable *st = ((struct insert_ctx *)ctx)->st;
-	// we scan the data here for better locality
-	((struct insert_ctx *)ctx)->lfs = count_lfs(data, len);
 	// if we are inserting at 0, pos will be 0
 	if(pos == 0 && leaf->spans[0]+len <= HIGH_WATER) {
 		assert(i == 0);
@@ -694,10 +683,12 @@ static long insert_leaf(struct node *leaf, size_t pos, long *span,
 	return delta;
 }
 
-size_t st_insert(SliceTable *st, size_t pos, const char *data, size_t len)
+bool st_insert(SliceTable *st, size_t pos, const char *data, size_t len)
 {
+	if(pos > st_size(st))
+		return false;
 	if(len == 0)
-		return 0;
+		return true;
 
 	st_dbg("st_insert at pos %zd of len %zd\n", pos, len);
 	struct node *split = NULL;
@@ -727,7 +718,7 @@ size_t st_insert(SliceTable *st, size_t pos, const char *data, size_t len)
 		st->root = newroot;
 		st->levels++;
 	}
-	return ctx.lfs;
+	return true;
 }
 
 /* deletion */
@@ -794,7 +785,6 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 		size_t oldspan = leaf->spans[i];
 		char *olddata = leaf->child[i];
 		size_t delta = -len;
-		*(size_t *)ctx = count_lfs(leaf->child[i] + pos, len);
 		size_t right_span = oldspan - pos - len;
 		char *right;
 		// copy right slice's data
@@ -853,12 +843,9 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 			*splitsize = newfill;
 		return delta;
 	} else { // pos + len >= leaf->spans[i]
-		size_t lfs = 0;
 		int start = i;
 		if(pos > 0) {
 			len -= leaf->spans[i] - pos; // no. deleted characters remaining
-			char **si = (char **)&leaf->child[i];
-			lfs += count_lfs(*si + pos, leaf->spans[i] - pos);
 			// may need to reallocate after truncation
 			if(leaf->spans[i] > HIGH_WATER && pos <= HIGH_WATER) {
 				char *new = malloc(HIGH_WATER);
@@ -871,7 +858,6 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 		int end = start;
 		while(end < fill && len >= leaf->spans[end]) {
 			char **se = (char **)&leaf->child[end];
-			lfs += count_lfs(*se, leaf->spans[end]);
 			// free small blocks
 			if(leaf->spans[end] <= HIGH_WATER) {
 				free(*se);
@@ -881,7 +867,6 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 		}
 		if(end < fill) { // if len == 0, st=end nothing happens. that's fine
 			char **se = (char **)&leaf->child[end];
-			lfs += count_lfs(*se, len);
 			// delete prefix of end
 			if(leaf->spans[end] <= HIGH_WATER) {
 				block_delete(*se, leaf->spans[end], 0, len);
@@ -926,16 +911,16 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 
 		if(fill < B/2 + (B&1))
 			*splitsize = fill ? fill : ULONG_MAX; // ULONG_MAX indicates 0 size
-		*(size_t *)ctx = lfs;
 		return *span += len; // |requested - deleted| = |change|
 	}
 }
 
-size_t st_delete(SliceTable *st, size_t pos, size_t len)
+bool st_delete(SliceTable *st, size_t pos, size_t len)
 {
-	len = MIN(len, st_size(st) - pos);
+	if(pos + len > st_size(st))
+		return false;
 	if(len == 0)
-		return 0;
+		return true;
 
 	st_dbg("st_delete at pos %zd of len %zd\n", pos, len);
 	struct node *split = NULL;
@@ -943,7 +928,6 @@ size_t st_delete(SliceTable *st, size_t pos, size_t len)
 	// we only need to ensure root uniqueness once
 	ensure_node_editable(&st->root, st->levels);
 
-	size_t lfs = 0;
 	do {
 		long remaining = -len;
 		// n.b. remaining is bytes left to delete.
@@ -951,7 +935,7 @@ size_t st_delete(SliceTable *st, size_t pos, size_t len)
 		// search for pos + 1 (see above)
 		// n.b. we never search for st_size+1 since that entails len = 0
 		edit_recurse(st, st->levels, st->root, pos+1, &remaining,
-					&delete_leaf, &lfs, &split, &splitsize);
+					&delete_leaf, NULL, &split, &splitsize);
 		len += remaining; // adjusted to byte delta (e.g. -3)
 		// handle underflow
 		if(st->levels > 1 && node_fill(st->root, 0) == 1) {
@@ -975,7 +959,7 @@ size_t st_delete(SliceTable *st, size_t pos, size_t len)
 		assert(st_check_invariants(st));
 	} while(len > 0);
 
-	return lfs;
+	return true;
 }
 
 /* iterator */
@@ -1083,13 +1067,12 @@ bool st_iter_next_chunk(SliceIter *it)
 		it->data = leaf->child[i+1];
 		return true;
 	}
-	// traverse upwards until we find one
 	int si = 0;
 	struct stackentry *s = &it->stack[si];
-	while(si < iter_stacksize(it) &&
-			!(s->idx < B-1 && s->node->spans[s->idx+1] != ULONG_MAX))
+	while(si < iter_stacksize(it) && s->idx < B-1 &&
+			s->node->spans[s->idx+1] == ULONG_MAX)
 		s++, si++;
-
+	// first condition fails if off-end
 	if(si != iter_stacksize(it)) {
 		it->stack[si].idx++;
 		while(--si > 0) {
@@ -1201,28 +1184,54 @@ char st_iter_prev_byte(SliceIter *it, size_t count)
 	return st_iter_prev_byte(it, count - left);
 }
 
-#include <wchar.h>
-#define MBERR ((size_t)-1)
-#define MBPART ((size_t)-2)
-
-
-long st_iter_cp(const SliceIter *it);
-/*
+// Assume utf-8
+// Assume that codepoints are not split across leaf boundaries
+// if this occurs, it means the user has already corrupted the file,
+// which should not be allowed. We never redistribute leaves, only merge
+long st_iter_cp(const SliceIter *it)
 {
-	mbstate_t mbs = {0};
-	wchar_t wch;
-	size_t ret = mbrtowc(&wch, buf, left, &mbs);
-	return wch;
+	static const char utf8_len[] = {
+		1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+		0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 3, 3, 4, 0
+	};
+	static const char utf8_lead_masks[] = { 0, 0xFF, 0x1F, 0xF, 0x7 };
+	// in any other case the iterator points into data
+	if(iter_off_end(it))
+		return -1;
+	char lead = *it->data;
+	unsigned char len = utf8_len[lead >> 3];
+	if(len < it->span - it->off)
+		return -1;
+
+	long cp = lead & utf8_lead_masks[len];
+	for(unsigned char i = 1; i < len; i++)
+		cp = cp<<6 | (it->data[i] & 0x3F);
+	return cp <= 0x10FFFF ? cp : -1;
 }
-*/
 
-long st_iter_next_cp(SliceIter *it, size_t count);
-long st_iter_prev_cp(SliceIter *it, size_t count);
+// skip over non-leading bytes
+long st_iter_next_cp(SliceIter *it, size_t count)
+{
+	// leading
+	if((*it->data & 0xC0) != 0x80)
+		;
+	return st_iter_cp(it);
+}
 
-bool st_iter_next_line(SliceIter *it, size_t count);
-bool st_iter_prev_line(SliceIter *it, size_t count);
+long st_iter_prev_cp(SliceIter *it, size_t count)
+{
+	return st_iter_cp(it);
+}
 
-size_t st_iter_visual_col(const SliceIter *it);
+bool st_iter_next_line(SliceIter *it, size_t count)
+{
+	;
+}
+
+bool st_iter_prev_line(SliceIter *it, size_t count)
+{
+	;
+}
 
 /* debugging */
 
