@@ -1,14 +1,16 @@
 CC = clang
-CFLAGS = -Wall -Wno-parentheses -std=c11 -D_POSIX_C_SOURCE=199309L # for time.h
+CFLAGS = -Wall -Wno-parentheses -std=c11 -D_POSIX_C_SOURCE=200809L # openat
 DFLAGS = -Wextra -g -fsanitize=undefined -fsanitize=address
 
 debug:
 	#$(CC) array.c main.c -o array $(CFLAGS) $(DFLAGS)
+	#$(CC) chain/*.c main.c -o pchain $(CFLAGS) $(DFLAGS)
 	$(CC) btree.c main.c -o btree $(CFLAGS) $(DFLAGS)
 
 opt:
 	#$(CC) array.c main.c -o array -O3 $(CFLAGS) -DNDEBUG
-	$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG -g
+	#$(CC) chain/*.c main.c -o pchain -O3 $(CFLAGS) -DNDEBUG
+	$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG
 
 lib:
 	$(CC) -c -fPIC btree.c $(CFLAGS)
