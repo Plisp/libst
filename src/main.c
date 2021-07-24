@@ -61,6 +61,7 @@ int main(int argc, char **argv)
 		if(matchpos[len-1]) { // goes after above for len = 1 match
 			matchpos[len-1] = 0;
 			matches[matchcount++] = i - (len-1);
+			if(matchcount == max) break;
 		}
 		i++;
 	} while((c = st_iter_next_byte(it, 1)) != -1);
