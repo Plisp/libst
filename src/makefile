@@ -1,5 +1,5 @@
 CC = clang
-CFLAGS = -Wall -Wno-parentheses -std=c11 -D_POSIX_C_SOURCE=200809L # openat
+CFLAGS = -Wall -Wno-parentheses -std=c11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
 DFLAGS = -Wextra -g -fsanitize=undefined -fsanitize=address
 
 debug:

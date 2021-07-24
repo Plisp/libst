@@ -8,7 +8,7 @@
 // TODO use ropey's batch replacement approach
 int main(int argc, char **argv)
 {
-#if 1
+#if 0
 	SliceTable *st = st_new();
 	st_insert(st, 0, "test", 4);
 	SliceIter *it = st_iter_new(st, 0);
@@ -17,13 +17,17 @@ int main(int argc, char **argv)
 #if 1
 	st_print_struct_sizes();
 	if(argc < 4) {
-		fprintf(stderr, "usage <filename> <search pattern> <replacement pattern>\n");
+		fprintf(stderr, "usage <filename> <search pattern> "
+				"<replacement pattern> <max matches>\n");
 		return 1;
 	}
 	const char *pattern = argv[2];
 	const char *replace = argv[3];
+	int max = atoi(argv[4]);
+	if(!max) return 1;
 	size_t len = strlen(pattern);
 	size_t replacelen = strlen(replace);
+	size_t *matches = malloc(sizeof(size_t) * max);
 
 	struct timespec before, after;
 	clock_gettime(CLOCK_REALTIME, &before);
@@ -33,16 +37,16 @@ int main(int argc, char **argv)
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
 			(after.tv_sec - before.tv_sec) * 1000);
 
-	SliceTable *clone = st_clone(st);
+	//SliceTable *clone = st_clone(st);
 	SliceIter *it = st_iter_new(st, 0);
 	size_t i = 0;
-	char c;
+	char c = st_iter_byte(it);
 	bool *matchpos = calloc(len, sizeof(bool));
-	int matches = 0;
+	int matchcount = 0;
 
 	clock_gettime(CLOCK_REALTIME, &before);
 	// a basic search, comparable to ropey's search_and_replace.rs
-	while((c = st_iter_next_byte(it, 1)) != -1) {
+	do {
 		for(int m = len - 2; m >= 0; m--) {
 			if(matchpos[m]) { // already matched at i
 				if(c == pattern[m+1]) {
@@ -51,30 +55,35 @@ int main(int argc, char **argv)
 				matchpos[m] = 0;
 			}
 		}
-		// try matching latest character
 		if(c == pattern[0]) {
-			matchpos[0] = i;
+			matchpos[0] = true;
 		}
-		if(matchpos[len-1]) { // fully matched!
-			st_delete(st, i - len+2, len);
-			st_insert(st, i - len+2, replace, replacelen);
-			st_iter_to(it, i+1);
+		if(matchpos[len-1]) { // goes after above for len = 1 match
 			matchpos[len-1] = 0;
-			matches++;
+			matches[matchcount++] = i - (len-1);
 		}
 		i++;
+	} while((c = st_iter_next_byte(it, 1)) != -1);
+	// do replacements at once
+	int delta = replacelen - len;
+	int deltacum = 0;
+	for(int i = 0; i < matchcount; i++) {
+		st_delete(st, matches[i] + deltacum, len);
+		st_insert(st, matches[i] + deltacum, replace, replacelen);
+		deltacum += delta;
 	}
 	clock_gettime(CLOCK_REALTIME, &after);
-	st_pprint(st);
+	st_dump(st, stdout);
 	fprintf(stderr, "found/replaced %d matches in %f ms, "
 			"leaves: %zd, size %zd, depth %d\n",
-			matches,
+			matchcount,
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
 			(after.tv_sec - before.tv_sec) * 1000,
 			st_node_count(st), st_size(st), st_depth(st));
 	free(matchpos);
+	free(matches);
 	st_iter_free(it);
-	st_free(clone);
+	//st_free(clone);
 	st_free(st);
 #else
 #ifndef NDEBUG

@@ -930,7 +930,7 @@ bool st_delete(SliceTable *st, size_t pos, size_t len)
 
 	do {
 		long remaining = -len;
-		// n.b. remaining is bytes left to delete.
+		// n.b. remaining = bytes *left* to delete.
 		st_dbg("deleting... %ld bytes remaining\n", remaining);
 		// search for pos + 1 (see above)
 		// n.b. we never search for st_size+1 since that entails len = 0
@@ -1072,10 +1072,10 @@ bool st_iter_next_chunk(SliceIter *it)
 	while(si < iter_stacksize(it) && s->idx < B-1 &&
 			s->node->spans[s->idx+1] == ULONG_MAX)
 		s++, si++;
-	// first condition fails if off-end
-	if(si != iter_stacksize(it)) {
+	// note: condition below is false if off-end
+	if(si < iter_stacksize(it)) {
 		it->stack[si].idx++;
-		while(--si > 0) {
+		while(--si >= 0) {
 			it->stack[si].node = it->stack[si+1].node->child[0];
 			it->stack[si].idx = 0;
 		}
@@ -1086,7 +1086,7 @@ bool st_iter_next_chunk(SliceIter *it)
 		it->off = 0;
 		it->data = it->leaf->child[0];
 		return true;
-	} else { // if the stack was insufficient, search from the root
+	} else {
 		st_dbg("gave up. scanning from root for %zd\n", it->pos);
 		st_iter_to(it, it->pos);
 		return !iter_off_end(it);
@@ -1097,28 +1097,26 @@ bool st_iter_prev_chunk(SliceIter *it)
 {
 	int i = it->node_offset;
 	struct node *leaf = it->leaf;
+	// note: this makes iter_prev_byte nice; have to choose some off anyways
+	it->pos -= it->off + 1; // = 0 when [X][X|...
 	// fast path: same leaf
 	if(i > 0) {
 		it->node_offset--;
 		it->span = it->leaf->spans[i-1];
 		it->off = it->span - 1;
 		it->data = (char *)leaf->child[i-1] + it->off;
-		it->pos -= it->off + 1;
 		return true;
 	}
 	int si = 0;
 	struct stackentry *s = &it->stack[si];
 	while(si < iter_stacksize(it) && s->idx == 0)
 		s++, si++;
-
-	if(si != iter_stacksize(it)) {
+	if(si < iter_stacksize(it)) {
 		it->stack[si].idx--;
-		while(--si > 0) {
+		while(--si >= 0) {
 			struct node *parent = it->stack[si+1].node;
-			int parentfill = node_fill(parent, 0);
-			it->stack[si].node = parent->child[parentfill-1];
-			int fill = node_fill(it->stack[si].node, 0);
-			it->stack[si].idx = fill - 1;
+			it->stack[si].node = parent->child[node_fill(parent, 0) - 1];
+			it->stack[si].idx = node_fill(it->stack[si].node, 0) - 1;
 		}
 		int leaf_i = it->stack[0].idx;
 		struct node *leaf = (struct node *)it->stack[0].node->child[leaf_i];
@@ -1128,13 +1126,11 @@ bool st_iter_prev_chunk(SliceIter *it)
 		it->span = leaf->spans[fill-1];
 		it->off = it->span - 1;
 		it->data = (char *)leaf->child[fill-1] + it->off;
-		return true;
-	} else { // if stack was insufficient, reinitialize
-		if(it->pos == it->off) // we're on the first chunk already
-			st_iter_to(it, 0);
-		else
-			st_iter_to(it, it->pos - it->off - 1);
-		return it->pos > 0;
+	} else if(it->pos >= 0) { // for first chunk, we get pos-off-1 = -1
+		st_iter_to(it, it->pos);
+	} else {
+		st_iter_to(it, 0);
+		return false;
 	}
 	return true;
 }
@@ -1194,43 +1190,95 @@ long st_iter_cp(const SliceIter *it)
 		1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
 		0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 3, 3, 4, 0
 	};
-	static const char utf8_lead_masks[] = { 0, 0xFF, 0x1F, 0xF, 0x7 };
-	// in any other case the iterator points into data
-	if(iter_off_end(it))
+	static const char utf8_lead_masks[] = { 0, 0xFF, 0x1F, 0x0F, 0x07 };
+	if(iter_off_end(it)) // otherwise we always have at least one byte
 		return -1;
 	char lead = *it->data;
 	unsigned char len = utf8_len[lead >> 3];
-	if(len < it->span - it->off)
+	if(len < it->span - it->off) // incomplete seq
 		return -1;
-
 	long cp = lead & utf8_lead_masks[len];
 	for(unsigned char i = 1; i < len; i++)
 		cp = cp<<6 | (it->data[i] & 0x3F);
 	return cp <= 0x10FFFF ? cp : -1;
 }
 
-// skip over non-leading bytes
 long st_iter_next_cp(SliceIter *it, size_t count)
 {
-	// leading
-	if((*it->data & 0xC0) != 0x80)
-		;
+	/*
+	size_t chunk_remaining = it->span - it->off;
+	char *data;
+	// scan complete chunks so no it->off update is needed
+	// n.b. count = remaining means we need to at least reach the next chunk
+	while(count >= chunk_remaining) {
+		data = it->data + 1;
+		while(chunk_remaining--) { // TODO can be vectorised
+			if((*data++ & 0xC0) != 0x80) count--;
+		}
+		if(!st_iter_next_chunk(it))
+			return -1;
+		// at least chunk_remaining bytes must be checked
+		if((chunk_remaining = MIN(it->span, count)) > 0)
+			chunk_remaining = it->span;
+	}
+	*/
+	while(count > 0) {
+		char byte = st_iter_next_byte(it, 1);
+		if(byte == -1) return -1;
+		if((byte & 0xC0) != 0x80) count--;
+	}
 	return st_iter_cp(it);
 }
 
 long st_iter_prev_cp(SliceIter *it, size_t count)
 {
+	while(count > 0) {
+		char byte = st_iter_prev_byte(it, 1);
+		if(byte == -1) return -1;
+		if((byte & 0xC0) != 0x80) count--;
+	}
 	return st_iter_cp(it);
 }
 
+// go forwards count newlines, step forward once
 bool st_iter_next_line(SliceIter *it, size_t count)
 {
-	;
+	while(count > 0) {
+		char *match = memchr(it->data, '\n', it->span - it->off);
+		if(match) {
+			size_t delta = match - it->data;
+			it->pos += delta;
+			it->off += delta;
+			it->data = match;
+			count--;
+			continue;
+		}
+		if(!st_iter_next_chunk(it))
+			return false;
+	}
+	st_iter_next_byte(it, 1); // it's ok if it's off end
+	return true;
 }
 
+// go backwards count+1 newlines, step forward once
 bool st_iter_prev_line(SliceIter *it, size_t count)
 {
-	;
+	count++;
+	while(count > 0) {
+		char *match = memrchr(it->data - it->off, '\n', it->off);
+		if(match) {
+			size_t delta = it->data - match;
+			it->pos -= delta;
+			it->off -= delta;
+			it->data = match;
+			count--;
+			continue;
+		}
+		if(!st_iter_prev_chunk(it))
+			return false;
+	}
+	st_iter_next_byte(it, 1);
+	return true;
 }
 
 /* debugging */
