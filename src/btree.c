@@ -15,31 +15,27 @@
 	#include <unistd.h>
 	#include <sys/mman.h>
 #else
-	#error TODO mmap for non-unix systems
+	#error TODO file mapping for non-unix systems
 #endif
 
 #include "st.h"
 
-#define HIGH_WATER (1<<15)
+#define HIGH_WATER (1<<12)
 #define LOW_WATER (HIGH_WATER/2)
 
 #if __x86_64__
 	#define USETAGS
 #endif
 
+// data is owned by the block - lives as long as the slicetable, same with
+// the leaves that immutably point into it. So this is safe, but how in rust?
 enum blktype { HEAP, MMAP };
 struct block {
-	// atomic counter of references to this block
-	atomic_int refc;
-	// packed with int above. LARGE_MMAP indicates file mmap
+	atomic_int refc; // packed with int below
 	enum blktype type;
-	// owned by the block, which lives as long as the slicetable, same as the
-	// leaves that immutably point into it. So this is safe, but how in rust?
 	char *data;
-	// length of the block, used for mmap
-	size_t len;
-	// singly linked list for freeing later
-	struct block *next;
+	size_t len; // needed for mmap
+	struct block *next; // for freeing later
 };
 
 #define NODESIZE (256 - sizeof(atomic_int)) // close enough
@@ -47,19 +43,14 @@ struct block {
 #define B ((int)(NODESIZE / PER_B))
 struct node {
 	atomic_int refc;
-	// TODO we could pack a int size field here. Is it worth it?
 	size_t spans[B];
 	void *child[B]; // in leaves (level 1), these are data pointers
 };
 
 struct slicetable {
-	// tree root
 	struct node *root;
-	// singly linked list of blocks
 	struct block *blocks;
-	// used for recursion. we could tag pointers instead, but that's a hack
-	// and we need to track blocks anyways
-	int levels;
+	int levels; // we could use tagging but blocks need to be tracked anyways
 };
 
 /* blocks */
@@ -78,7 +69,7 @@ static void drop_block(struct block *block)
 	if(atomic_fetch_sub_explicit(&block->refc,1,memory_order_release) == 1) {
 		atomic_thread_fence(memory_order_acquire);
 		if(block->next)
-			drop_block(block->next);
+			drop_block(block->next); // TODO this should be iterative
 		free_block(block);
 	}
 }
@@ -136,7 +127,7 @@ static int node_offset(const struct node *node, size_t *key)
 	return i;
 }
 
-// count the number of live entries in node counting up from START
+// count the number of live entries in node counting up from node(start)
 static int node_fill(const struct node *node, int start)
 {
 	int i;
@@ -168,10 +159,6 @@ void drop_node(struct node *root, int level)
 
 static void incref(atomic_int *refc)
 {
-	// Should be safe as long as this increment is made visible to another
-	// thread T in passing the object to T, avoiding a data race when T reads
-	// refc == 1 and proceeds to modify the object inplace whilst our original
-	// thread is accessing it.
 	// I'm trusting the boost atomics documentation here
 	atomic_fetch_add_explicit(refc, 1, memory_order_relaxed);
 }
@@ -184,7 +171,6 @@ static void ensure_node_editable(struct node **nodeptr, int level)
 		memcpy(copy, node, sizeof *copy);
 		atomic_store_explicit(&copy->refc, 1, memory_order_relaxed);
 		// in a leaf, copy small data blocks as we modify them inplace
-		// TODO, use a reference counted type to avoid unnecessary copying
 		int fill = node_fill(node, 0);
 		if(level == 1) {
 			for(int i = 0; i < fill; i++)
@@ -210,11 +196,12 @@ size_t node_count(const struct node *node, int level)
 {
 	if(level == 1)
 		return 1;
-
-	size_t count = 0;
-	for(int i = 0; i < node_fill(node, 0); i++)
-		count += node_count(node->child[i], level-1);
-	return count;
+	else {
+		size_t count = 0;
+		for(int i = 0; i < node_fill(node, 0); i++)
+			count += node_count(node->child[i], level-1);
+		return count;
+	}
 }
 
 size_t st_node_count(const SliceTable *st)
@@ -250,7 +237,6 @@ SliceTable *st_new_from_file(const char *path)
 	if(len <= HIGH_WATER) {
 		data = malloc(HIGH_WATER);
 		lseek(fd, 0, SEEK_SET);
-		// TODO
 		if(read(fd, data, len) != len) {
 			free(data);
 			free(st);
@@ -342,7 +328,8 @@ int merge_slices(size_t spans[static 5], char *data[static 5],
 	while(i < fill) {
 		if(spans[i] + spans[i-1] <= HIGH_WATER) {
 			// We only worry about underfull nodes, so no need to handle split
-			slice_insert(&data[i-1], spans[i-1], data[i], spans[i], &spans[i-1]);
+			slice_insert((void **)&data[i-1], spans[i-1],
+						data[i], spans[i], &spans[i-1]);
 #ifdef USETAGS // free if not tagged as large
 			if(!((uintptr_t)data[i] >> 63))
 				free(data[i]);
@@ -356,6 +343,12 @@ int merge_slices(size_t spans[static 5], char *data[static 5],
 			i++;
 	}
 	return fill;
+}
+
+static void slotmove(struct node *n, int to, int from, int count)
+{
+	memmove(&n->spans[to], &n->spans[from], count * sizeof(size_t));
+	memmove(&n->child[to], &n->child[from], count * sizeof(void *));
 }
 
 static struct node *split_node(struct node *node, int offset)
@@ -380,12 +373,10 @@ size_t rebalance_node(struct node * restrict i, struct node * restrict j,
 			i->child[ifill+c] = j->child[c];
 			delta += i->spans[ifill+c];
 		}
-		memmove(&j->spans[0], &j->spans[count], (jfill-count)*sizeof(size_t));
-		memmove(&j->child[0], &j->child[count], (jfill-count)*sizeof(void *));
+		slotmove(j, 0, count, jfill - count);
 		node_clrslots(j, jfill - count, jfill);
 	} else {
-		memmove(&i->spans[count], &i->spans[0], ifill * sizeof(size_t));
-		memmove(&i->child[count], &i->child[0], ifill * sizeof(void *));
+		slotmove(i, count, 0, ifill);
 		for(int c = 0; c < count; c++) {
 			i->spans[c] = j->spans[jfill-count+c];
 			i->child[c] = j->child[jfill-count+c];
@@ -417,8 +408,7 @@ void node_remove(struct node *root, int fill, int j)
 {
 	free(root->child[j]); // slices shifted over, no need for full drop
 	size_t count = fill - (j+1);
-	memmove(&root->spans[j], &root->spans[j+1], count * sizeof(size_t));
-	memmove(&root->child[j], &root->child[j+1], count * sizeof(void *));
+	slotmove(root, j, j+1, count);
 	node_clrslots(root, fill - 1, fill);
 }
 
@@ -434,24 +424,23 @@ static long edit_recurse(SliceTable *st, int level, struct node *root,
 {
 	if(level == 1)
 		return base_case((void*)root, pos, span, (void*)split, splitsize, ctx);
-	else { // level > 1: node node recursion
+	else { // level > 1: inner node recursion
 		struct node *childsplit = NULL;
 		size_t childsize = 0;
 		int i = node_offset(root, &pos);
-
 		ensure_node_editable((struct node **)&root->child[i], level - 1);
+
 		long delta = edit_recurse(st, level - 1, root->child[i], pos, span,
 								base_case, ctx, &childsplit, &childsize);
 		st_dbg("applying upwards delta at level %d: %ld\n", level, delta);
 		root->spans[i] += delta;
-		// reset delta
-		delta = *span;
-
+		delta = *span; // is used to update split. reset it now for parents
+		// fixup
 		if(childsize) {
 			if(childsplit) { // overflow: attempt to insert childsplit at i+1
 				i++;
 				int fill = node_fill(root, i);
-				if(fill == B) {
+				if(fill == B) { // TODO this is repeated x3 clean it up
 					fill = B/2 + (i > B/2);
 					*split = split_node(root, fill);
 					*splitsize = node_sum(*split, B - fill);
@@ -463,10 +452,7 @@ static long edit_recurse(SliceTable *st, int level, struct node *root,
 						i -= fill;
 					}
 				}
-				size_t *start = &root->spans[i];
-				struct node **cstart = (struct node **)&root->child[i];
-				memmove(start + 1, start, (fill - i) * sizeof(size_t));
-				memmove(cstart + 1, cstart, (fill - i) * sizeof(void*));
+				slotmove(root, i+1, i, fill - i);
 				root->spans[i] = childsize;
 				root->child[i] = childsplit;
 			} else { // children[i] underflowed
@@ -491,7 +477,6 @@ static long edit_recurse(SliceTable *st, int level, struct node *root,
 													jfill))
 								jfill--, shifted += res;
 					}
-					// transfer some slots from j to i
 					shifted += rebalance_node((void *)root->child[i],
 											(void *)root->child[j],
 											childsize, jfill, i < j);
@@ -513,43 +498,34 @@ static long edit_recurse(SliceTable *st, int level, struct node *root,
 /* insertion */
 
 static long insert_within_slice(struct node *leaf, int fill,
-							int i, size_t off, char *new, size_t newlen,
-							struct node **split, size_t *splitsize)
+								int i, size_t off, char *new, size_t newlen,
+								struct node **split, size_t *splitsize)
 {
-	size_t *left_span = &leaf->spans[i];
-	char **left = (char **)&leaf->child[i];
-	size_t right_span = *left_span - off;
+	size_t right_span = leaf->spans[i] - off;
 	char *right;
 	// maintain block uniqueness
 	if(right_span <= HIGH_WATER) {
 		right = malloc(HIGH_WATER);
-		memcpy(right, *left + off, right_span);
+		memcpy(right, leaf->child[i] + off, right_span);
 	} else
-		right = *left + off;
-
-	assert(off > 0); // should be handled by general case
+		right = leaf->child[i] + off;
 	// demote left slice if necessary
 	if(leaf->spans[i] > HIGH_WATER && off <= HIGH_WATER) {
 		char *new = malloc(HIGH_WATER);
-		memcpy(new, *left, off);
-		*left = new;
+		memcpy(new, leaf->child[i], off);
+		leaf->child[i] = new;
 	} // then truncate
-	*left_span = off;
+	leaf->spans[i] = off;
 	// fill tmp
-	size_t tmpspans[5];
-	char *tmp[5];
+	size_t tmpspans[5]; char *tmp[5];
 	int tmpfill = 0;
 	if(i > 0) {
 		tmpspans[tmpfill] = leaf->spans[i-1];
 		tmp[tmpfill++] = leaf->child[i-1];
 	}
-	tmpspans[tmpfill] = *left_span;
-	tmp[tmpfill++] = *left;
-	tmpspans[tmpfill] = newlen;
-	tmp[tmpfill++] = new;
-	tmpspans[tmpfill] = right_span;
-	tmp[tmpfill++] = right;
-
+	tmpspans[tmpfill] = leaf->spans[i]; tmp[tmpfill++] = leaf->child[i];
+	tmpspans[tmpfill] = newlen;         tmp[tmpfill++] = new;
+	tmpspans[tmpfill] = right_span;     tmp[tmpfill++] = right;
 	if(i+1 < fill) {
 		tmpspans[tmpfill] = leaf->spans[i+1];
 		tmp[tmpfill++] = leaf->child[i+1];
@@ -558,37 +534,30 @@ static long insert_within_slice(struct node *leaf, int fill,
 	int delta = tmpfill - newfill;
 	assert(delta <= 3); // [S][S1|Si|S2][S] -> [L][S], S1+S2 > HIGH_WATER
 	st_dbg("merged %d nodes\n", delta);
-	if(i > 0) {
-		i--, left_span--, left--; // see above
-	}
+	i -= i>0; // see above
 	int realfill = fill - (delta-2);
 	if(realfill <= B) {
 		size_t count = fill - (i + (tmpfill-2));
-		memmove(left_span + newfill, left_span + (tmpfill-2),
-				count * sizeof(size_t));
-		memmove(left + newfill, left + (tmpfill-2), count * sizeof(char *));
+		slotmove(leaf, i + newfill, i + tmpfill-2, count);
 		// when delta == 0, newfill exceeds tmpfill-2 and may overwrite
 		// old slots, so we copy afterwards
-		memcpy(left_span, tmpspans, newfill * sizeof(size_t));
-		memcpy(left, tmp, newfill * sizeof(char *));
+		memcpy(&leaf->spans[i], tmpspans, newfill * sizeof(size_t));
+		memcpy(&leaf->child[i], tmp, newfill * sizeof(char *));
 		if(delta > 2)
 			node_clrslots(leaf, realfill, fill);
 		if(realfill < B/2 + (B&1))
 			*splitsize = realfill; // indicate underflow
 		return newlen;
 	} else { // realfill > B: leaf split, we have at most 2 new slices
-		size_t spans[B + 2];
-		char *blocks[B + 2];
-		// copy all data to temporary buffers and distribute
+		size_t spans[B + 2]; char *blocks[B + 2];
+		// copy all data to temporary buffers and distribute. merge impossible
 		memcpy(spans, leaf->spans, i * sizeof(size_t));
 		memcpy(blocks, leaf->child, i * sizeof(char *));
 		memcpy(&spans[i], tmpspans, newfill * sizeof(size_t));
 		memcpy(&blocks[i], tmp, newfill * sizeof(char *));
-		int count = fill - (i + (tmpfill-2));
-		memcpy(&spans[i+newfill], &leaf->spans[i+tmpfill-2],
-				count * sizeof(size_t));
-		memcpy(&blocks[i+newfill], &leaf->child[i+tmpfill-2],
-				count * sizeof(char *));
+		int count = fill - (i + tmpfill-2);
+		memcpy(&spans[i+newfill], &leaf->spans[i+tmpfill-2], count*sizeof(size_t));
+		memcpy(&blocks[i+newfill], &leaf->child[i+tmpfill-2], count*sizeof(char *));
 		struct node *right_split = new_node();
 		// n.b. we must compute delta directly since merging moves the insert
 		size_t oldsum = node_sum(leaf, fill) + right_span;
@@ -596,10 +565,8 @@ static long insert_within_slice(struct node *leaf, int fill,
 		size_t right_fill = realfill - (B/2 + 1); // B=4 5,6 -> 2,3 in right
 		memcpy(leaf->spans, spans, new_node_fill * sizeof(size_t));
 		memcpy(leaf->child, blocks, new_node_fill * sizeof(char *));
-		memcpy(right_split->spans, &spans[new_node_fill],
-				right_fill * sizeof(size_t));
-		memcpy(right_split->child, &blocks[new_node_fill],
-				right_fill * sizeof(char *));
+		memcpy(right_split->spans, &spans[new_node_fill], right_fill*sizeof(size_t));
+		memcpy(right_split->child, &blocks[new_node_fill], right_fill*sizeof(char *));
 		node_clrslots(leaf, new_node_fill, fill);
 		node_clrslots(right_split, right_fill, B);
 		size_t newsum = node_sum(leaf, new_node_fill);
@@ -641,8 +608,7 @@ static long insert_leaf(struct node *leaf, size_t pos, long *span,
 	} // try start of i+1
 	else if(at_bound && (i < fill-1) && leaf->spans[i+1]+len <= HIGH_WATER) {
 		slice_insert(&leaf->child[i+1], 0, data, len, &leaf->spans[i+1]);
-	} // all has failed, we must make a copy and deal with splitting
-	else {
+	} else { // all has failed, we must make a copy and deal with splitting
 		char *copy;
 		if(len > HIGH_WATER) {
 			copy = malloc(len);
@@ -663,22 +629,21 @@ static long insert_leaf(struct node *leaf, size_t pos, long *span,
 			if(fill == B) {
 				fill = B/2 + (i > B/2);
 				*split = split_node(leaf, fill);
-				*splitsize = node_sum((struct node *)*split, B - fill);
+				*splitsize = node_sum(*split, B - fill);
 				delta -= *splitsize;
 				if(i > B/2) {
 					delta -= len;
 					*splitsize += len;
-					leaf = (struct node *)*split;
+					leaf = *split;
 					i -= fill;
 				}
 			}
-			memmove(&leaf->spans[i+1],&leaf->spans[i],(fill-i)*sizeof(size_t));
-			memmove(&leaf->child[i+1],&leaf->child[i],(fill-i)*sizeof(char *));
+			slotmove(leaf, i+1, i, fill - i);
 			leaf->spans[i] = len;
 			leaf->child[i] = copy;
 		} else
 			return insert_within_slice(leaf, fill, i, pos, copy, len,
-									split, splitsize);
+										split, splitsize);
 	}
 	return delta;
 }
@@ -726,20 +691,14 @@ bool st_insert(SliceTable *st, size_t pos, const char *data, size_t len)
 static int delete_within_slice(struct node *leaf, int fill,
 								int i, size_t new_right_span, char *new_right)
 {
-	size_t *slice_span = &leaf->spans[i];
-	char **data = (char **)&leaf->child[i];
-	size_t tmpspans[5];
-	char *tmp[5];
+	size_t tmpspans[5]; char *tmp[5];
 	int tmpfill = 0;
 	if(i > 0) {
 		tmpspans[tmpfill] = leaf->spans[i-1];
 		tmp[tmpfill++] = leaf->child[i-1];
 	}
-	tmpspans[tmpfill] = *slice_span;
-	tmp[tmpfill++] = *data;
-	tmpspans[tmpfill] = new_right_span;
-	tmp[tmpfill++] = new_right;
-
+	tmpspans[tmpfill] = leaf->spans[i]; tmp[tmpfill++] = leaf->child[i];
+	tmpspans[tmpfill] = new_right_span; tmp[tmpfill++] = new_right;
 	if(i+1 < fill) {
 		tmpspans[tmpfill] = leaf->spans[i+1];
 		tmp[tmpfill++] = leaf->child[i+1];
@@ -751,19 +710,14 @@ static int delete_within_slice(struct node *leaf, int fill,
 	int delta = tmpfill - newfill;
 	assert(delta <= 3); // [S][S|S][S] -> [S]
 	int realfill = fill - (delta-1);
-
 	if(realfill > B)
 		return B + 1;
 	st_dbg("merged %d nodes\n", delta);
-	if(i > 0) {
-		i--, slice_span--, data--; // see above
-	}
+	i -= i>0;
 	int count = fill - (i + (tmpfill-1)); // exclude new_right
-	memmove(slice_span + newfill, slice_span + (tmpfill-1),
-			count * sizeof(size_t));
-	memmove(data + newfill, data + (tmpfill-1), count * sizeof(char *));
-	memcpy(slice_span, tmpspans, newfill * sizeof(size_t));
-	memcpy(data, tmp, newfill * sizeof(char *));
+	slotmove(leaf, i + newfill, i + tmpfill-1, count);
+	memcpy(&leaf->spans[i], tmpspans, newfill * sizeof(size_t));
+	memcpy(&leaf->child[i], tmp, newfill * sizeof(char *));
 	if(delta > 0)
 		node_clrslots(leaf, realfill, fill);
 	return realfill;
@@ -779,8 +733,8 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 	pos--;
 	st_dbg("deletion: found slot %d, offset %zd, target fill %d\n",
 			i, pos, fill);
-	size_t len = -*span;
-
+	size_t len = -*span; // positive deletion length
+	// delete within slice?
 	if(pos > 0 && pos + len < leaf->spans[i]) {
 		size_t oldspan = leaf->spans[i];
 		char *olddata = leaf->child[i];
@@ -825,17 +779,15 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 			// fill == B, we must split
 			fill = B/2 + (i > B/2);
 			*split = split_node(leaf, fill);
-			*splitsize = node_sum((struct node *)*split, B - fill);
+			*splitsize = node_sum(*split, B - fill);
 			delta -= *splitsize; // = -(len + *splitsize)
 			if(i > B/2) {
 				delta -= right_span;
 				*splitsize += right_span;
-				leaf = (struct node *)*split;
+				leaf = *split;
 				i -= fill;
 			}
-			size_t n = fill - i;
-			memmove(&leaf->spans[i+1], &leaf->spans[i], n * sizeof(size_t));
-			memmove(&leaf->child[i+1], &leaf->child[i], n * sizeof(char *));
+			slotmove(leaf, i+1, i, fill - i);
 			leaf->spans[i] = right_span;
 			leaf->child[i] = right;
 		}
@@ -852,24 +804,20 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 				memcpy(new, leaf->child[i], pos);
 				leaf->child[i] = new;
 			}
-			leaf->spans[i] = pos; // truncate si, fine for small blocks
+			leaf->spans[i] = pos;
 			start++;
 		}
 		int end = start;
 		while(end < fill && len >= leaf->spans[end]) {
-			char **se = (char **)&leaf->child[end];
-			// free small blocks
-			if(leaf->spans[end] <= HIGH_WATER) {
-				free(*se);
-			}
+			if(leaf->spans[end] <= HIGH_WATER)
+				free(leaf->child[end]);
 			len -= leaf->spans[end];
 			end++;
 		}
 		if(end < fill) { // if len == 0, st=end nothing happens. that's fine
-			char **se = (char **)&leaf->child[end];
 			// delete prefix of end
 			if(leaf->spans[end] <= HIGH_WATER) {
-				block_delete(*se, leaf->spans[end], 0, len);
+				block_delete(leaf->child[end], leaf->spans[end], 0, len);
 				leaf->spans[end] -= len;
 			} else { // cannot become 0 as the loop would've continued
 				leaf->spans[end] -= len;
@@ -879,18 +827,14 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 					memcpy(new, leaf->child[end], leaf->spans[end]);
 					leaf->child[end] = new;
 				} else
-					*se += len;
+					leaf->child[end] += len;
 			}
 			len = 0;
 		}
-		memmove(&leaf->spans[start], &leaf->spans[end],
-				(fill - end) * sizeof(size_t));
-		memmove(&leaf->child[start], &leaf->child[end],
-				(fill - end) * sizeof(char *));
+		slotmove(leaf, start, end, fill - end);
 		int oldfill = fill;
 		fill = start + fill-end;
-		size_t tmpspans[5];
-		char *tmp[5];
+		size_t tmpspans[5]; char *tmp[5];
 		// it's this simple! n.b. start may be truncated. Thus use start - 2
 		start = MAX(0, start - 2);
 		int tmpfill = MIN(fill - start, 4); // [][s|][|e][]
@@ -903,15 +847,11 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 		memcpy(&leaf->spans[start], tmpspans, newfill * sizeof(size_t));
 		memcpy(&leaf->child[start], tmp, newfill * sizeof(char *));
 		// move old entries down
-		memmove(&leaf->spans[start+newfill], &leaf->spans[start+tmpfill],
-				(oldfill - (start + tmpfill)) * sizeof(size_t));
-		memmove(&leaf->child[start+newfill], &leaf->child[start+tmpfill],
-				(oldfill - (start + tmpfill)) * sizeof(char *));
+		slotmove(leaf, start+newfill, start+tmpfill, oldfill-(start+tmpfill));
 		node_clrslots(leaf, fill, oldfill);
-
 		if(fill < B/2 + (B&1))
 			*splitsize = fill ? fill : ULONG_MAX; // ULONG_MAX indicates 0 size
-		return *span += len; // |requested - deleted| = |change|
+		return *span += len; // span (-) + (len - deleted (+)) = change
 	}
 }
 
@@ -927,7 +867,6 @@ bool st_delete(SliceTable *st, size_t pos, size_t len)
 	size_t splitsize;
 	// we only need to ensure root uniqueness once
 	ensure_node_editable(&st->root, st->levels);
-
 	do {
 		long remaining = -len;
 		// n.b. remaining = bytes *left* to delete.
@@ -958,7 +897,6 @@ bool st_delete(SliceTable *st, size_t pos, size_t len)
 		}
 		assert(st_check_invariants(st));
 	} while(len > 0);
-
 	return true;
 }
 
@@ -1097,7 +1035,11 @@ bool st_iter_prev_chunk(SliceIter *it)
 {
 	int i = it->node_offset;
 	struct node *leaf = it->leaf;
-	// note: this makes iter_prev_byte nice; have to choose some off anyways
+	if(it->pos == it->off) { // only true in first chunk
+		it->off = it->pos = 0;
+		it->data = leaf->child[0];
+		return false;
+	}
 	it->pos -= it->off + 1; // = 0 when [X][X|...
 	// fast path: same leaf
 	if(i > 0) {
@@ -1126,12 +1068,8 @@ bool st_iter_prev_chunk(SliceIter *it)
 		it->span = leaf->spans[fill-1];
 		it->off = it->span - 1;
 		it->data = (char *)leaf->child[fill-1] + it->off;
-	} else if(it->pos >= 0) { // for first chunk, we get pos-off-1 = -1
+	} else
 		st_iter_to(it, it->pos);
-	} else {
-		st_iter_to(it, 0);
-		return false;
-	}
 	return true;
 }
 
@@ -1212,7 +1150,7 @@ long st_iter_next_cp(SliceIter *it, size_t count)
 	// n.b. count = remaining means we need to at least reach the next chunk
 	while(count >= chunk_remaining) {
 		data = it->data + 1;
-		while(chunk_remaining--) { // TODO can be vectorised
+		while(chunk_remaining--) { // could be vectorised?
 			if((*data++ & 0xC0) != 0x80) count--;
 		}
 		if(!st_iter_next_chunk(it))
@@ -1431,7 +1369,7 @@ void st_dump(const SliceTable *st, FILE *file)
 				enqueue((struct q){ next->level-1, next->node->child[i] });
 		else // start dumping
 			for(int i = 0; i < node_fill(next->node, 0); i++)
-				fprintf(file, "%.*s", (int)next->node->spans[i], // TODO write
+				fprintf(file, "%.*s", (int)next->node->spans[i],
 						(char *)next->node->child[i]);
 }
 
