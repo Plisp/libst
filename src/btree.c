@@ -38,7 +38,7 @@ struct block {
 	struct block *next; // for freeing later
 };
 
-#define NODESIZE (256 - sizeof(atomic_int)) // close enough
+#define NODESIZE (128 - sizeof(atomic_int)) // close enough
 #define PER_B (sizeof(size_t) + sizeof(void *))
 #define B ((int)(NODESIZE / PER_B))
 struct node {
