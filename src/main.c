@@ -74,7 +74,7 @@ int main(int argc, char **argv)
 		deltacum += delta;
 	}
 	clock_gettime(CLOCK_REALTIME, &after);
-	st_dump(st, stdout);
+	//st_dump(st, stdout);
 	fprintf(stderr, "found/replaced %d matches in %f ms, "
 			"leaves: %zd, size %zd, depth %d\n",
 			matchcount,

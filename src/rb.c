@@ -32,8 +32,8 @@ struct block {
 #define BLK (1ULL<<63) // this is *not* general purpose
 struct slice {
 	struct rb_node rb;
-	size_t llen; // left subtree length
 	size_t len; // length
+	size_t llen; // left subtree length
 	char *data;
 };
 
@@ -410,12 +410,10 @@ bool st_delete(SliceTable *st, size_t pos, size_t len)
 
 struct sliceiter {
 	struct slice *s;
+	char *data;
 	size_t offset;
+	size_t span;
 };
-
-// st_iter_new, st_iter_free
-// st_iter_byte
-// st_iter_next_byte
 
 SliceIter *st_iter_new(SliceTable *st, size_t pos)
 {
@@ -426,12 +424,16 @@ SliceIter *st_iter_new(SliceTable *st, size_t pos)
 	struct slice *s = st_search(st, pos, &pos, 0);
 	it->offset = pos;
 	it->s = s;
+	it->span = it->s->len;
+	it->data = it->s->data;
 	// allow off-end iterators only at end of document for iter_byte
 	if(pos == s->len) {
 		struct rb_node *next = rb_next(&s->rb);
 		if(next) {
 			it->s = rb_entry(next, struct slice, rb);
 			it->offset = 0;
+			it->span = s->len;
+			it->data = s->data;
 		}
 	}
 	return it;
@@ -440,7 +442,7 @@ SliceIter *st_iter_new(SliceTable *st, size_t pos)
 void st_iter_free(SliceIter *it) { free(it); }
 
 static bool iter_off_end(const SliceIter *it) {
-	return it->offset == it->s->len;
+	return it->offset == it->span;
 }
 
 char st_iter_byte(const SliceIter *it)
@@ -448,7 +450,7 @@ char st_iter_byte(const SliceIter *it)
 	if(iter_off_end(it))
 		return -1;
 	else
-		return it->s->data[it->offset];
+		return *it->data;
 }
 
 char st_iter_next_byte(SliceIter *it, size_t count)
@@ -456,13 +458,17 @@ char st_iter_next_byte(SliceIter *it, size_t count)
 	while(count--) {
 		if(iter_off_end(it))
 			return -1;
-		if(++(it->offset) == it->s->len) {
+		if(++(it->offset) == it->span) {
 			struct rb_node *next;
 			if(next = rb_next(&it->s->rb)) {
-				it->s = rb_entry(next, struct slice, rb);
+				struct slice *s = rb_entry(next, struct slice, rb);
+				it->s = s;
 				it->offset = 0;
+				it->span = s->len;
+				it->data = s->data;
 			}
-		}
+		} else
+			it->data++;
 	}
 	return st_iter_byte(it);
 }
