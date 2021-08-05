@@ -1,0 +1,394 @@
+\documentclass[8pt,a4paper,twocolumn]{article}
+
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{wrapfig}
+\usepackage{minted}
+\usepackage{mdframed}
+\usepackage{amsmath}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage[superscript]{cite}
+\usepackage[bookmarks]{hyperref}
+\surroundwithmdframed{minted}
+
+\title{\textbf{The Slicetable: a practical text editor buffer structure}}
+\author{Thomas Qu}
+
+\makeatletter \renewcommand{\@citess}[1]{\textsuperscript{\,[#1]}} \makeatother
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+  Both established and recent text editors tend to exhibit suboptimal performance with
+  files of large size, long line length or whilst performing intensive bulk editing
+  operations such as find/replace.  However unresponsiveness in these conditions is far
+  from a foregone conclusion given the capabilities of modern hardware.  The bottleneck
+  tends to be the underlying text buffer structure, typically implemented as naive
+  chunked sequences which do not efficiently exploit the properties of the text editing
+  domain.
+
+  In this paper we present a novel structure generalizing the rope and piece table
+  designs commonly employed in existing editors, and an efficient persistent
+  implementation in the C language.  We also consider the integration of our
+  implementation into the environments of high-level languages perhaps more suited to
+  editor development.  Further, we present benchmarks of realistic editing scenarios
+  which demonstrate the superior performance of slicetables compared to state-of-the-art
+  structures used in existing editors as well as the recent functional Relaxed Radix
+  Balanced Trees.
+\end{abstract}
+
+\section{Introduction}
+
+The domain of editor structures has been analyzed fairly thoroughly by
+Finseth\cite{textds}.  However recent advances in hardware including the exponential
+growth of persistent storage capacity, complex cache hierarchies and aggressive
+speculative execution mean new strategies must be developed to adapt editor structures to
+modern systems. Throughout this paper a \emph{text buffer} will refer to a data structure
+suitable for maintaining a sequence of bytes representing a document being edited within
+a text editor, supporting at least the operations
+\begin{itemize}
+
+\item \emph{load(file)} which loads a new text buffer from disk
+\item \emph{save(file)} which writes the text buffer's contents to disk
+\item \emph{range(i, n)} reports a range of $n$ bytes starting at $i$
+\item \emph{insert(i, s)} which inserts the byte string $s$ at after the $i$th byte in
+  the text buffer, causing the byte previously at $i$ to be indexed by $i + length(s)$,
+  the byte at $i+1$ to be indexed by $i+1 + length(s)$, etc.
+\item \emph{delete(i, n)}\footnote{While a generic replace(range, string) operation is
+    conceptually elegant by encapsulating both insert and delete, it adds to
+    implementation complexity unnecessarily. Caching likely mitigates the cost of
+    performing a delete then insert when a replacement is actually needed.}  which
+  deletes $n$ bytes after the $i$th byte in the text buffer, decreasing the indices of
+  bytes previously indexed at $i+n$ by $n$
+
+\end{itemize}
+
+We define an \emph{edit} operation as being either an insert or a delete.
+
+Note that indexing in codepoints is unnecessary in an text buffer, as in the vast
+majority of cases code operates sequentially on grapheme clusters (e.g. deleting a
+character, cursor movement) or bytes (e.g. searching). Further, the desired behavior is
+unclear in the case of files containing invalid multibyte sequences, which may often
+occur when dealing with binary files or corrupted data. Overall the additional complexity
+of tracking codepoints due to multibyte encodings does not seem to be generally
+worthwhile in the context of a text editor.
+
+\subsection{Efficiency of editing operations}
+
+The simplest representation of a text buffer is to lay out a file's bytes in a contiguous
+array. However then, the time taken for insertions near the start of the buffer grows
+$O(n)$,\footnote{$n$ will be taken to mean the byte size of the file} as all the text
+after the insertion point must be shifted to make room.  Modern text editors typically
+employ one of three techniques:
+\begin{itemize}
+
+  \setlength\itemsep{0.1ex}
+
+\item the gap buffer: use two arrays, with edits taking place at the end of the first
+  array, which are $O(1)$. Text is copied to and from the end of the first array as the
+  cursor moves.
+\item Divide the file into chunks of a maximum size $f$ so that insertions and deletions
+  move at most $f$ bytes. Includes ropes and arrays of lines.
+\item the piece table approach, where document is represented as a sequence of
+  descriptors, which can be manipulated rather than large quantities of text.
+
+\end{itemize}
+
+\subsection{File loading speed}
+In an editor we want to load large files quickly, whether the user opens a file for
+editing or by accident. Text buffer structures which manipulate an in-memory sequence of
+fixed-size chunks, such as the rope, do not scale well in this respect, as large file's
+full contents must be copied. Further, it's possible files may not even fit in
+memory. Given the relatively large capacities of modern persistent storage devices, it is
+reasonable to expect text editors to handle files (e.g. log files) of multiple hundred
+megabytes to gigabytes in size.
+
+A solution is to implement a paging system, storing unused chunks of files on disk and
+loading them on demand. The well known Vim editor takes this
+approach.\footnote{https://www.free-soft.org/FSM/english/issue01/vim.html} However this
+involves considerable implementation complexity (better delegated to the operating
+system) as well as consequences for performance due to increased system calls for reading
+from disk.
+
+The piece table solves this problem by utilizing the operating system's virtual memory
+facilities to perform paging. Modern operating systems allow the usage of virtual address
+spaces larger than main memory by interfacing with the CPU's MMU. When a CPU attempts to
+load an unmapped chunk of memory, the MMU generates a page fault, signalling the
+operating system to load the required page (typically a few kB) of memory into RAM. The
+fetch is then restarted and proceeds normally.
+
+\begin{figure}[H]
+  \includegraphics[width=\linewidth]{persistent.png}
+  \caption{New represents the document returned after adding an exclamation mark, whose
+    contents can be read via the 4 connected bottom boxes from left to right.
+    Directional arrows represent pointers.  Note how only $O(log n)$ nodes along the path
+    to the modified chunk need to be updated.}
+  \label{fig:persistent}
+\end{figure}
+
+\subsection{Persistence}
+A modern editor is required to retain old versions of documents being edited for the
+purposes of undo/redo functionality. The typical approach is to keep a operation log of
+inserts/deletes and implement the ability to revert them.
+
+Another approach is taken by Atom's
+superstring,\footnote{https://github.com/atom/superstring} which essentially manipulates
+edits as an in-memory diff. Finseth\cite{craft} comments that the 'difference file'
+method eventually requires a separate text buffer to manage inserted text, which is
+visible when large contiguous portions of text are entered into Atom, due to it tracking
+inserted text via an array. However his argument that edit tracking may entail additional
+memory overhead is annulled by the need to support undo, as well as the large secondary
+memory capacities available today.
+
+However we instead implemented a \emph{persistent} structure, where edit operations
+return a new copy of the data structure sharing structure with the original. The extra
+overhead of this design is reasonable considering that the operation log method is still
+required to maintain a similar quantity of information - for example a copy must be made
+of deleted segments of text so that they may be undone later. There are other tradeoffs
+inherent to piece tables structures, which will be detailed later.  The maintenance of
+deleted and inserted text becomes implicit in our persistent design, which provides the
+further benefits of simple concurrent use (see figure \ref{fig:persistent}).
+
+\subsection{Concurrency}
+
+Some editors can perform background saving and code analysis, which is useful when
+dealing with large files, allowing the user to proceed while the file is written to disk
+or parsed. This requires the data structure to support concurrent reads for
+safety.\footnote{usually it does not make sense to support concurrent writes in a single
+  user context, as edits will race with the user, leading to unintuitive results. The Xi
+  project struggled with this problem.} We take the approach of functional updates via
+path copying so that old persistent versions are always safe for readers, though they may
+temporarily operate on an outdated copy.
+
+\subsection{Cursor maintenance}
+
+This is tricky TODO
+
+\section{Related Work}
+
+\subsection{Fixed size chunks}
+
+-
+
+\subsection{Piece Table}
+
+The piece table (see fig \ref{fig:piecetable}).
+
+\begin{figure}
+  \includegraphics[width=0.95\linewidth]{piecetable.png}
+  \caption{The pointers into the files are annotated with the length of the segment they
+    refer to, similarly to how they would be represented in memory.}
+  \label{fig:piecetable}
+\end{figure}
+
+\begin{itemize}
+
+\item stealing does *not* help here. We would much rather manipulate descriptors than
+  text
+
+\item unsafe COW allows for a transient API to be implemented by the type system of a
+  higher-level wrapper. Operations on the persistent version edit on a clone, whilst the
+  transient version only needs to clone once, and tracks this with a flag.
+
+\item setting small threshold = 0 is a piece table
+
+\item avoidance of additional branch at each level by utilizing fullness
+
+\item similar implementation complexity to ropes
+\item discuss mark maintenance briefly. Note that lazy maintenance is not sufficient in
+  an editor, and so it is efficient to do it elsewhere (record changes in array of
+  index/cumulative offset, update in logm).
+\item mention truncation optimization for appends in delete leaf
+\item large blocks may only be created due to large insertions - usually not reverted
+  unlike small changes, which should not be recorded due to transient operations
+
+\item slice merging - present independently of index structure - we want to shift minimal
+  data upon inserts - but maintain a tunable bound on number of slices (better than pt)
+\item in both cases, large buffers are kept immutable and shared - on average, insertion
+  into small pieces, which is equivalent in cost to typical balancing, or middle of very
+  large >2f pieces, which is optimal. Especially space-efficient when most of file is
+  untouched
+
+  - inserted data is either converted to large or small slice
+
+\item standard buffer merging - lazily loaded rope - insertion into small always done
+  directly, if overflow, split into two with half contents in each buffer - deletion may
+  cause underflow - insertion into large may split off small, which must be merged using
+  underflow handling - unclear what should occur when both adjacent slices are large.
+  Splitting off is often unnecessary work - consider a disjoint set of small insertions
+  (separated by over f bytes). Then stealing copies f/2 bytes for each insertion
+
+\item relaxed merging algorithm - ensure no adjacent slices <= f for
+  $$B\cdot\frac{f}{2} - f/2$$ fill factor. - adjacent small slices in the region are merged left where possible - if
+  combined fill >f, we promote to a large slice
+
+\item no stealing cases - unnecessary
+\item relaxed splitting seems almost optimal for search/replace, resulting in simple
+  appends
+\item however we may as well do rebalancing for inner nodes, as in reading the fill we
+  have already loaded it into cache. Implementing stealing then merely takes a single
+  conditional.
+
+\item rather than implement error handling on the C side, which has rudimentary error
+  reporting capabilities, do it in the high-level language
+
+\end{itemize}
+
+
+
+
+
+
+\section{Slicetable}
+
+As we have seen, most chunking structures (e.g. the ``rope'' as the term is commonly
+used) necessitate either the loading of whole files into memory, or a custom
+implementation of a paging system.  The key idea of the Slicetable is to explicitly
+utilize the OS's paging facilities. This is achieved by manipulating large unmodified
+spans of text (viz. the freshly loaded file) by indirecting through descriptors in the
+manner of a piece table whilst small blocks may be modified in-place and rebalanced, as
+in a rope. The heterogeneous sequence of descriptors may then be stored in a suitable
+structure supporting an additive monoid such as a Btree.
+
+In the following text we refer to these descriptors as \emph{slices} to reflect possible
+indirection into a file mapping.
+
+\begin{figure*}
+  \includegraphics[height=2cm]{slicetable.png}
+  \caption{Example of a slicetable after an edit}
+\end{figure*}
+
+In practice, we copy small portions of the original document as it fragments (less than
+some small constant $H$ similar to the constant employed by ropes) into \emph{small}
+slices which may be modified inplace, whilst slices larger than $H$ are fragmented during
+edits according to [insert piece table listing]. It should be observed that setting
+$H = 0$ is equivalent to a piece table, and hence our structure constitutes a
+generalization of the piece table.
+
+However it is greatly wasteful in our case to utilize the obvious invariant of ensuring
+all small slices of text exceed $H/2$, as scattered edits will incur a copy and
+allocation of $H/2$ bytes from the file mapping for each modification.  To avoid this, we
+introduce the concept of \emph{relaxed merging}, in contrast with the strict merging
+invariant of ropes,
+
+(Ropes typically maintain the invariant that each text chunk must have a fill factor
+between some maximum $f/2$ and $f$ for some small constant $f$. The algorithm simply
+splits overfull leaves and redistributes the text of underfull leaves with
+neighbors. Underfull rebalancing is achieved by observing that any leaf $l$ satisfying
+the invariant and adjacent to the underfull leaf $u$ may either be merged with $l$ into a
+single leaf containing at least $f/2$ and less than $f$, or if their combined text
+exceeds $f$ we may need to copy up to $f/2$ bytes from $l$ into $u$. It is fairly easy to
+see that at most $f$ bytes are moved during each rebalancing operation.  TODO prove that
+bold claim and move this earlier)
+
+, which operates by the algorithm in listing 1. Here we merge adjacent descriptors only
+if their combined content does not exceed $H$, maintaining an worst-case fill factor
+close to 1/2, competitive with rope rebalancing as shown below.
+
+
+\begin{listing}
+\begin{minted}{c}
+merge_slices(spans[], data[], int fill)
+{
+  i = 1
+  while(i < fill) {
+    if(spans[i-1] + spans[i] <= H) {
+      data[i-1] ++= data[i]
+      spans[i-1] += spans[i]
+      free(data[i])
+      spans[i,fill-1] = spans[i+1,fill]
+      data[i,fill-1] = data[i+1,fill]
+      fill -= 1
+    } else {
+      i += 1
+    }
+  }
+  return fill;
+}
+\end{minted}
+\caption{Block merging algorithm}
+\end{listing}
+
+\subsection{Height bound vs ropes}
+TODO
+
+
+
+
+
+\section{Implementation}
+
+\subsection{Index structure}
+Our implementation is based on a b+-tree index structure, which improves cache
+performance by reducing block transfers.
+
+We make the decision not to track line offsets, although it should be noted that they can
+simply be tracked with an extra field at each node and in text chunks, similar to the
+technique used for indexing bytes. However it should be noted that this necessitates
+eventually reading in the whole file, defeating the purpose of utilizing virtual paging.
+\footnote{it may be possible to do this asynchronously, but this involves further
+  complexity}.
+
+We concluded that in their typical use of assigning compiler diagnostics to locations in
+a file, the bottleneck will typically be the compiler rather than the editor structure
+(this should happen asynchronously in any case). The use of line numbers for identifying
+locations in a file is simply satisfied by referring to features of the document instead,
+such as function definitions, sections, etc.  Therefore absolute line numbering is not
+optimized to $O(log n)$, but iterators allow traversal of newlines at multiple GB/s,
+which is certainly sufficient for basic display routines and cursor movements.
+
+\subsection{Language Integration}
+Our implementation requires low level communication with the OS, but editor development
+is likely more suited to a high level language with appropriate abstractions. TODO
+
+
+\section{Evaluation}
+
+\subsection{Methodology}
+
+% TODO contact cessen
+
+vis' linked list piece tables (fast file loading, slow search/replace). rb tree slicetable
+(tuned as piece table, slice table, talk about vscode, cache) red black tree is 25
+percent slower than Btree piece table searching/replacing '1000' - scan performance
+matters
+
+
+We used Ropey as a primary competitor, as it was the most performant structure known to
+us, employing a balanced b+tree structure to track a sequence of fixed-size chunks.  It
+was possible to remove line tracking, but not the codepoint tracking functionality which
+was built into the core of the structure (though the search implementation uses the Bytes
+iterator, which was found to increase performance by around 10\%). Therefore these
+benchmarks are not fully indicative of the performance gap between the
+structures. However we still believe that the 2x increase in performance cannot be simply
+put down to locality.
+
+
+
+
+\section{Further work}
+
+Modern CPUs aggressively pipeline code execution, fetching memory and instructions long
+before they are executed. The Btree is not an ideal index structure for main
+memory\cite{art} as branch mispredictions incurred by linear search at each level leads
+to pipeline stalls, while the CPU refreshes the instruction cache.
+
+Converting the underlying structure to a trie is an interesting future direction for
+research.
+
+TODO look into using a radix trie to implement the descriptor sequence and update the
+paper. Do the experimental evaluation then
+
+The generalization of a focus is interesting but adds significant complexity to
+implementation.\cite{errb} It remains unclear whether the performance advantages in
+certain cases is significant, and there remains the problem of maintaining multiple
+cursors, which cannot be represented as a single focus.
+
+https://blog.atom.io/2017/10/12/atoms-new-buffer-implementation.html
+https://code.visualstudio.com/blogs/2018/03/23/text-buffer-reimplementation
+
+\bibliographystyle{unsrt} \bibliography{slicetable}
+
+\end{document}

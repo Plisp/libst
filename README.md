@@ -104,9 +104,20 @@ b+tree of segmented gtktextlines
 red black tree
 <https://github.com/microsoft/vscode/blob/main/src/vs/editor/common/model/pieceTreeTextBuffer/rbTreeBase.ts>
 
-## atom (hybrid blocks)
+## atom (hybrid blocks - difference file)
 
-patch structure
+* Splay trees are difficult to use concurrently, as to implement reads efficiently,
+mutating the tree is necessary in splaying visited nodes to the root.
+
+* Using a sequence of 'patches' tracking both inserted text and deletions from the
+original provides questionable benefits over a piece table - at maximum halving the number
+of nodes - for a considerable increase in complexity.
+
+* though insertions are usually small, if a inserted command output is overly large,
+operations become O(n) afaik
+
+* the recursive snapshot trick can be applied to piece tables equally
+
 https://github.com/atom/superstring/blob/master/src/core/patch.h
 
 ## vim (blocks)
