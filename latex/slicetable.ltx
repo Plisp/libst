@@ -91,14 +91,14 @@ employ one of three techniques:
   cursor moves.
 \item Divide the file into chunks of a maximum size $f$ so that insertions and deletions
   move at most $f$ bytes. Includes ropes and arrays of lines.
-\item the piece table approach, where document is represented as a sequence of
+\item the piece table approach, where document is represented as a list of
   descriptors, which can be manipulated rather than large quantities of text.
 
 \end{itemize}
 
 \subsection{File loading speed}
 In an editor we want to load large files quickly, whether the user opens a file for
-editing or by accident. Text buffer structures which manipulate an in-memory sequence of
+editing or by accident. Text buffer structures which manipulate an in-memory list of
 fixed-size chunks, such as the rope, do not scale well in this respect, as large file's
 full contents must be copied. Further, it's possible files may not even fit in
 memory. Given the relatively large capacities of modern persistent storage devices, it is
@@ -164,13 +164,15 @@ temporarily operate on an outdated copy.
 
 \subsection{Cursor maintenance}
 
-This is tricky TODO
+Another issue is the maintenance of several editing \emph{cursors}
 
 \section{Related Work}
 
-\subsection{Fixed size chunks}
+\subsection{Chunking}
 
--
+includes ropes
+
+786115235258909781
 
 \subsection{Piece Table}
 
@@ -249,7 +251,7 @@ implementation of a paging system.  The key idea of the Slicetable is to explici
 utilize the OS's paging facilities. This is achieved by manipulating large unmodified
 spans of text (viz. the freshly loaded file) by indirecting through descriptors in the
 manner of a piece table whilst small blocks may be modified in-place and rebalanced, as
-in a rope. The heterogeneous sequence of descriptors may then be stored in a suitable
+in a rope. The heterogeneous list of descriptors may then be stored in a suitable
 structure supporting an additive monoid such as a Btree.
 
 In the following text we refer to these descriptors as \emph{slices} to reflect possible
@@ -357,7 +359,7 @@ matters
 
 
 We used Ropey as a primary competitor, as it was the most performant structure known to
-us, employing a balanced b+tree structure to track a sequence of fixed-size chunks.  It
+us, employing a balanced b+tree structure to track a list of fixed-size chunks.  It
 was possible to remove line tracking, but not the codepoint tracking functionality which
 was built into the core of the structure (though the search implementation uses the Bytes
 iterator, which was found to increase performance by around 10\%). Therefore these
@@ -376,10 +378,9 @@ memory\cite{art} as branch mispredictions incurred by linear search at each leve
 to pipeline stalls, while the CPU refreshes the instruction cache.
 
 Converting the underlying structure to a trie is an interesting future direction for
-research.
-
-TODO look into using a radix trie to implement the descriptor sequence and update the
-paper. Do the experimental evaluation then
+research. Same cache accesses, improvement in branches during search? (this probably
+isn't really worth it on reconsideration, as scan performance and insertion are
+more important)
 
 The generalization of a focus is interesting but adds significant complexity to
 implementation.\cite{errb} It remains unclear whether the performance advantages in
