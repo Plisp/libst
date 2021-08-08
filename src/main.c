@@ -37,7 +37,7 @@ int main(int argc, char **argv)
 			(after.tv_nsec - before.tv_nsec) / 1000000.0f +
 			(after.tv_sec - before.tv_sec) * 1000);
 
-	//SliceTable *clone = st_clone(st);
+	SliceTable *clone = st_clone(st);
 	SliceIter *it = st_iter_new(st, 0);
 	size_t i = 0;
 	char c = st_iter_byte(it);
@@ -84,7 +84,7 @@ int main(int argc, char **argv)
 	free(matchpos);
 	free(matches);
 	st_iter_free(it);
-	//st_free(clone);
+	st_free(clone);
 	st_free(st);
 #else
 #ifndef NDEBUG

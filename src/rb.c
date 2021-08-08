@@ -16,10 +16,9 @@
 #include "st.h"
 #include "rblinux/rbtree_augmented.h"
 
-// slices >= HIGH_WATER must be immutable
-#define HIGH_WATER 8
+#define HIGH_WATER (1<<12)
 
-enum blktype { HEAP, MMAP, };
+enum blktype { HEAP, MMAP };
 
 struct block {
 	enum blktype type;
@@ -137,7 +136,7 @@ void st_dump(const SliceTable *st, FILE *file)
 
 bool st_check_invariants(const SliceTable *st)
 {
-	return true;
+	return st;
 }
 
 void st_print_struct_sizes(void)
@@ -197,7 +196,7 @@ SliceTable *st_new_from_file(const char *path)
 	void *data;
 	if(len <= HIGH_WATER) {
 		data = malloc(HIGH_WATER);
-		if(read(fd, data, len) != len) {
+		if(read(fd, data, len) != (long)len) {
 			free(data);
 			return NULL;
 		}
@@ -220,14 +219,14 @@ SliceTable *st_new_from_file(const char *path)
 	rb_insert_color(&s->rb, &st->root);
 
 	struct block *init = malloc(sizeof(struct block));
-	*init = (struct block){ type, data, len, };
+	*init = (struct block){ type, data, len, NULL };
 	st->blocks = init;
 	return st;
 }
 
 SliceTable *st_clone(const SliceTable *st)
 {
-	return st_new(); // dummy, this doesn't actually support cloning
+	return NULL;
 }
 
 static void tree_free(struct rb_node *node)
@@ -241,6 +240,8 @@ static void tree_free(struct rb_node *node)
 
 void st_free(SliceTable *st)
 {
+	if(!st)
+		return;
 	struct block *this, *next = st->blocks;
 	while(next) {
 		this = next;
@@ -332,7 +333,6 @@ bool st_insert(SliceTable *st, size_t pos, const char *data, size_t len)
 {
 	if(len == 0)
 		return 0;
-	// insert into data vectors
 	char *inserted = NULL;
 	if(st->blocks->size + len <= HIGH_WATER) {
 		char *point = &st->blocks->data[st->blocks->size];

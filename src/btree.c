@@ -237,7 +237,7 @@ SliceTable *st_new_from_file(const char *path)
 	if(len <= HIGH_WATER) {
 		data = malloc(HIGH_WATER);
 		lseek(fd, 0, SEEK_SET);
-		if(read(fd, data, len) != len) {
+		if(read(fd, data, len) != (long)len) {
 			free(data);
 			free(st);
 			return NULL;
@@ -389,10 +389,9 @@ size_t rebalance_node(struct node * restrict i, struct node * restrict j,
 
 size_t merge_boundary(struct node **lptr, int lfill)
 {
-	struct node *l = lptr[0];
-	struct node *r = lptr[1];
-	// merge the boundary slices if possible
-	if(l->spans[lfill-1] + r->spans[0] <= HIGH_WATER) {
+	struct node *l = lptr[0], *r = lptr[1];
+
+	if(l->spans[lfill - 1] + r->spans[0] <= HIGH_WATER) {
 		size_t delta = l->spans[lfill-1];
 		slice_insert(&r->child[0], 0, l->child[lfill-1], delta, &r->spans[0]);
 		free(l->child[lfill-1]);
@@ -435,7 +434,6 @@ static long edit_recurse(SliceTable *st, int level, struct node *root,
 		st_dbg("applying upwards delta at level %d: %ld\n", level, delta);
 		root->spans[i] += delta;
 		delta = *span; // is used to update split. reset it now for parents
-		// fixup
 		if(childsize) {
 			if(childsplit) { // overflow: attempt to insert childsplit at i+1
 				i++;
@@ -460,7 +458,7 @@ static long edit_recurse(SliceTable *st, int level, struct node *root,
 				int j = i > 0 ? i-1 : i+1;
 				int fill = node_fill(root, i);
 				long shifted = 0;
-				// 
+				//
 				if(childsize == ULONG_MAX)
 					root->spans[j = i] = 0; // mark j = i as deleted
 				else {
@@ -815,13 +813,12 @@ static long delete_leaf(struct node *leaf, size_t pos, long *span,
 			end++;
 		}
 		if(end < fill) { // if len == 0, st=end nothing happens. that's fine
-			// delete prefix of end
 			if(leaf->spans[end] <= HIGH_WATER) {
 				block_delete(leaf->child[end], leaf->spans[end], 0, len);
 				leaf->spans[end] -= len;
 			} else { // cannot become 0 as the loop would've continued
 				leaf->spans[end] -= len;
-				// was large, now small
+				// was large, now small needs to be copied
 				if(leaf->spans[end] <= HIGH_WATER) {
 					char *new = malloc(HIGH_WATER);
 					memcpy(new, leaf->child[end], leaf->spans[end]);

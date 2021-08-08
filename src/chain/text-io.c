@@ -199,36 +199,6 @@ static ssize_t write_all(int fd, const char *buf, size_t count) {
 	return count - rem;
 }
 
-static bool preserve_acl(int src, int dest) {
-#if CONFIG_ACL
-	acl_t acl = acl_get_fd(src);
-	if (!acl)
-		return errno == ENOTSUP ? true : false;
-	if (acl_set_fd(dest, acl) == -1) {
-		acl_free(acl);
-		return false;
-	}
-	acl_free(acl);
-#endif /* CONFIG_ACL */
-	return true;
-}
-
-static bool preserve_selinux_context(int src, int dest) {
-#if CONFIG_SELINUX
-	char *context = NULL;
-	if (!is_selinux_enabled())
-		return true;
-	if (fgetfilecon(src, &context) == -1)
-		return errno == ENOTSUP ? true : false;
-	if (fsetfilecon(dest, context) == -1) {
-		freecon(context);
-		return false;
-	}
-	freecon(context);
-#endif /* CONFIG_SELINUX */
-	return true;
-}
-
 static int mkstempat(int dirfd, char *template) {
 	if (dirfd == AT_FDCWD)
 		return mkstemp(template);
@@ -303,8 +273,6 @@ static bool text_save_begin_atomic(TextSave *ctx) {
 			goto err;
 	} else {
 		if (fchmod(ctx->fd, oldmeta.st_mode) == -1)
-			goto err;
-		if (!preserve_acl(oldfd, ctx->fd) || !preserve_selinux_context(oldfd, ctx->fd))
 			goto err;
 		/* change owner if necessary */
 		if (oldmeta.st_uid != getuid() && fchown(ctx->fd, oldmeta.st_uid, (uid_t)-1) == -1)

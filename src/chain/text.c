@@ -863,31 +863,6 @@ size_t text_size(const Text *txt) {
 	return txt->size;
 }
 
-/* count the number of new lines '\n' in range [pos, pos+len) */
-static size_t lines_count(Text *txt, size_t pos, size_t len) {
-	size_t lines = 0;
-	for (Iterator it = text_iterator_get(txt, pos);
-	     text_iterator_valid(&it);
-	     text_iterator_next(&it)) {
-		const char *start = it.text;
-		while (len > 0 && start < it.end) {
-			size_t n = MIN(len, (size_t)(it.end - start));
-			const char *end = memchr(start, '\n', n);
-			if (!end) {
-				len -= n;
-				break;
-			}
-			lines++;
-			len -= end - start + 1;
-			start = end + 1;
-		}
-
-		if (len == 0)
-			break;
-	}
-	return lines;
-}
-
 /* skip n lines forward and return position afterwards */
 static size_t lines_skip_forward(Text *txt, size_t pos, size_t lines, size_t *lines_skipped) {
 	size_t lines_old = lines;
@@ -1012,4 +987,8 @@ int st_depth(const Text *txt) {
 
 size_t st_node_count(const Text *txt) {
 	return st_depth(txt);
+}
+
+SliceTable *st_clone(const SliceTable *st) {
+	return NULL;
 }

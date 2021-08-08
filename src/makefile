@@ -3,12 +3,12 @@ CFLAGS = -Wall -Wno-parentheses -std=c11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE
 DFLAGS = -Wextra -g -fsanitize=undefined -fsanitize=address
 
 debug:
-	#$(CC) chain/*.c main.c -o pchain $(CFLAGS) $(DFLAGS)
+	$(CC) chain/*.c main.c -o pchain $(CFLAGS) $(DFLAGS)
 	$(CC) rblinux/*.c rb.c main.c -o rbtree $(CFLAGS) $(DFLAGS)
-	#$(CC) btree.c main.c -o btree $(CFLAGS) $(DFLAGS)
+	$(CC) btree.c main.c -o btree $(CFLAGS) $(DFLAGS)
 
 opt:
-	#$(CC) chain/*.c main.c -o pchain -O3 $(CFLAGS) -DNDEBUG
+	$(CC) chain/*.c main.c -o pchain -O3 $(CFLAGS) -DNDEBUG
 	$(CC) rblinux/*.c rb.c main.c -o rbtree -O3 $(CFLAGS) -DNDEBUG
 	$(CC) btree.c main.c -o btree -O3 $(CFLAGS) -DNDEBUG
 
