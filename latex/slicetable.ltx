@@ -29,7 +29,7 @@
   chunked sequences which do not efficiently exploit the properties of the text editing
   domain.
 
-  In this paper we present a novel structure generalizing the rope and piece table
+  In this paper we present a novel structure generalizing the rope and piece-table
   designs commonly employed in existing editors, and an efficient persistent
   implementation in the C language.  We also consider the integration of our
   implementation into the environments of high-level languages perhaps more suited to
@@ -46,22 +46,20 @@ Finseth\cite{textds}.  However recent advances in hardware including the exponen
 growth of persistent storage capacity, complex cache hierarchies and aggressive
 speculative execution mean new strategies must be developed to adapt editor structures to
 modern systems. Throughout this paper a \emph{text buffer} will refer to a data structure
-suitable for maintaining a sequence of bytes representing a document being edited within
-a text editor, supporting at least the operations
+suitable for maintaining a list of bytes representing a document being edited within a
+text editor, supporting at least the operations
 \begin{itemize}
 
 \item \emph{load(file)} which loads a new text buffer from disk
 \item \emph{save(file)} which writes the text buffer's contents to disk
 \item \emph{range(i, n)} reports a range of $n$ bytes starting at $i$
-\item \emph{insert(i, s)} which inserts the byte string $s$ at after the $i$th byte in
-  the text buffer, causing the byte previously at $i$ to be indexed by $i + length(s)$,
-  the byte at $i+1$ to be indexed by $i+1 + length(s)$, etc.
-\item \emph{delete(i, n)}\footnote{While a generic replace(range, string) operation is
+\item \emph{insert(i, c)} which inserts the character $c$ at after the $i$th byte in the
+  text buffer
+\item \emph{delete(i)}\footnote{While a generic replace(range, string) operation is
     conceptually elegant by encapsulating both insert and delete, it adds to
     implementation complexity unnecessarily. Caching likely mitigates the cost of
-    performing a delete then insert when a replacement is actually needed.}  which
-  deletes $n$ bytes after the $i$th byte in the text buffer, decreasing the indices of
-  bytes previously indexed at $i+n$ by $n$
+    performing a delete then insert when a replacement is actually needed.} which the
+  $i$th byte in the text buffer
 
 \end{itemize}
 
@@ -79,20 +77,19 @@ worthwhile in the context of a text editor.
 
 The simplest representation of a text buffer is to lay out a file's bytes in a contiguous
 array. However then, the time taken for insertions near the start of the buffer grows
-$O(n)$,\footnote{$n$ will be taken to mean the byte size of the file} as all the text
-after the insertion point must be shifted to make room.  Modern text editors typically
+$O(n)$, where $n$ will be taken to mean the byte size of the file as all the text
+after the insertion point must be shifted to make room. Modern text editors typically
 employ one of three techniques:
 \begin{itemize}
-
-  \setlength\itemsep{0.1ex}
 
 \item the gap buffer: use two arrays, with edits taking place at the end of the first
   array, which are $O(1)$. Text is copied to and from the end of the first array as the
   cursor moves.
 \item Divide the file into chunks of a maximum size $f$ so that insertions and deletions
   move at most $f$ bytes. Includes ropes and arrays of lines.
-\item the piece table approach, where document is represented as a list of
-  descriptors, which can be manipulated rather than large quantities of text.
+\item the piece-table approach, where document is represented as a list of fat pointers
+  (pointers to text and a length), which can be manipulated rather than large quantities
+  of text.
 
 \end{itemize}
 
@@ -112,7 +109,7 @@ involves considerable implementation complexity (better delegated to the operati
 system) as well as consequences for performance due to increased system calls for reading
 from disk.
 
-The piece table solves this problem by utilizing the operating system's virtual memory
+The piece-table solves this problem by utilizing the operating system's virtual memory
 facilities to perform paging. Modern operating systems allow the usage of virtual address
 spaces larger than main memory by interfacing with the CPU's MMU. When a CPU attempts to
 load an unmapped chunk of memory, the MMU generates a page fault, signalling the
@@ -147,7 +144,7 @@ return a new copy of the data structure sharing structure with the original. The
 overhead of this design is reasonable considering that the operation log method is still
 required to maintain a similar quantity of information - for example a copy must be made
 of deleted segments of text so that they may be undone later. There are other tradeoffs
-inherent to piece tables structures, which will be detailed later.  The maintenance of
+inherent to piece-tables structures, which will be detailed later.  The maintenance of
 deleted and inserted text becomes implicit in our persistent design, which provides the
 further benefits of simple concurrent use (see figure \ref{fig:persistent}).
 
@@ -164,39 +161,190 @@ temporarily operate on an outdated copy.
 
 \subsection{Cursor maintenance}
 
-Another issue is the maintenance of several editing \emph{cursors}
+A crucial consideration is the efficient maintenance of several \emph{cursors}
+(representing the user's editing cursor(s), compiler diagnostics, the first character of
+views into the buffer, etc.), which must be updated to correspond to a new index when
+edit operations occur (e.g. typing on the line above a compiler error should move the
+error forward in the document). Essentially, cursors are attached to a segment of
+\emph{text} rather than a fixed byte index.
 
-\section{Related Work}
+While it is possible to manage cursors within the structure itself, \footnote{See
+  github.com/Plisp/vico/blob/master/src/core/piece-table.lisp. Some appealing properties
+  include O(1) local edits and finding the next/previous chunk} the result is an increase
+the implementation complexity of edit operations, mixing with 'hot' code updating the
+structure itself. This was observed to impact cache locality, but it remains open whether
+some alternative approach works efficiently.
+
+A more common approach is to employ a interval tree or similar structure which maintains
+the cursors separately from the text buffer. However this still suffers from poor
+locality.
+
+On the other hand, we observe that typically a small constant number of cursors is
+necessary for maintaining views into the buffer and keep them in a simple array. A
+efficient mechanism for updating them during bulk replace operations is described later.
+It should be observed that typical multiple-cursor editing can be implemented by a macro
+system which only updates selections on screen, and commits the rest of the edits in
+bulk, with the benefit of far better locality.
+
+
+
+
+\section{Analysis of related work}
 
 \subsection{Chunking}
 
-includes ropes
+Chunking structures such as ropes divide the file into smaller chunks, so less text may
+be moved during edit operations. Some editors use an array of lines, causing edits to
+scale linearly in the length of lines. This method performs poorly with certain file
+types.  \footnote{e.g. minified javascript, script terminal dumps}
+
+Another variation commonly known as the rope\footnote{though the original rope structure
+  is specifically a binary tree structure implementing edits with a split routine and
+  confluently persistent concatenation}, such the invariant that each text chunk must
+have contain between $C/2$ and $C$ bytes, where $C$ is a constant typically near the page
+size, the unit in which virtual memory is allocated.
+
+\begin{listing}[H]
+\begin{minted}{c}
+node_offset(node, size_t *i)
+  slot = 0
+  while(*key > node->size[slot]) {
+     // key stores an offset on exit
+    *key -= node->size[slot++]
+  }
+  return i
+\end{minted}
+\caption{Searching in an (a,b)-tree. Most implementations seem to have two branches per
+entry per level, which is suboptimal, as edge cases may be handled prior to recursion.}
+\end{listing}
+
+Arranging chunks in an (a,b)-tree, we may simply replace keys with the cumulative size of
+each corresponding subtree - the search code repeated at each level is shown in listing 1
+and works for similar structures.  Note that the loop terminates for all
+$0 \leq i \leq size(buf)$ - in particular for the size of the buffer, which causes the
+loop to terminate on the last chunk as $i$ will equal the final chunk's size. A similar
+routine works if the chunk list is represented as a balanced BST, with an extra field at
+each node holding the cumulative size of its left subtree. This trick is well known and
+is used by Abiword\cite{abiword} and VSCode\cite{vscode}. The idea of storing
+cumulative sums can be viewed as analogous to the Fenwick tree\cite{fenwick}.
+
+When inserting text, the size of a chunk may exceed $C$, requiring it
+to be split. If a chunk $l$ would overflow, the combined size of inserted text and the
+original content exceeds $C$. Thus we can split the combined text into two chunks
+containing at least $C/2$, satisfying the invariant.
+
+Also, deletions may cause a chunk to temporarily fall below $C/2$ bytes, becoming
+underfull. If a chunk $l$ satisfying the invariant is adjacent to the underfull leaf $u$,
+if their combined text exceeds $C$ we may restore the invariant by copying up to $C/2$
+bytes from $l$ into $u$.  Otherwise merge it with $l$ into a single chunk containing
+below $C$ but more than $l$ initially had, which is at least $C/2$.
+
+It is easy to see that in both these cases at most $C$ bytes are moved during each
+rebalancing operation and invariants are restored. Assuming the chunks are stored in a
+log-balanced tree with minimum branching factor $A>1$, edit operations execute in
+$\Theta(log_{A}n)$ worst case.
 
 786115235258909781
 
-\subsection{Piece Table}
+\subsection{Piece-Table}
 
-The piece table (see fig \ref{fig:piecetable}).
-
-\begin{figure}
+\begin{figure}[H]
   \includegraphics[width=0.95\linewidth]{piecetable.png}
   \caption{The pointers into the files are annotated with the length of the segment they
     refer to, similarly to how they would be represented in memory.}
   \label{fig:piecetable}
 \end{figure}
 
+The piece-table is a less common approach which avoids any mutation of text chunks by
+maintaining a list of \emph{pieces} ((fat) pointers annotated with the positive length of
+the text segment they represent) into append-only chunks of text. As text never moves in
+memory once it's inserted, pieces may trivially point into these chunks. Further,
+implementing $load$ is trivial, as we can simply request for the file to be mapped onto
+the virtual address space and setup a single piece pointing to the start of that chunk,
+with a length equal to the file's length in bytes.
+
+In figure 2, a file initially contains ``lots and lots of text'', and the text `` and
+lots'' was just inserted. This is accomplished by splitting the first piece into two
+(note no text is moved in the process, so this is $O(1)$) and inserting a new piece in
+the list between the two halves, pointing to the inserted text. As more text is added, it
+is appended to the append file and new pieces pointing to it can be inserted in the list.
+Deletions involve similar manipulations of pieces, and are left as an exercise to the
+reader.
+
+One downside of this approach is that accumulating a large number of edits, especially
+over a short period of time (perhaps during a global bulk search/replace) degrades
+performance significantly due to a proliferation of pieces in the list. The worst case is
+total fragmentation of the file into $n$ 1-byte pieces in the piece list, $C$ (~4000)
+times more than a chunking structure. This behavior is especially apparent in editors
+such as Vis,\footnote{https://github.com/martanne/vis} which employ a linked list to
+represent the piece table, leading to catastrophic $O(n)$ reads.
+
+A common improvement on the classic linked-list is a red-black tree design, which is
+utilized by the Abiword word processor and (later heavily inspired) VSCode editor,
+achieving $O(log n)$ reads and edits in the worst case. However this is still greatly
+suboptimal, as potentially orders of magnitudes more pieces must be maintained in a list
+than necessary.
+
+
+
+
+\section{Slicetable}
+
+As we have seen, most chunking structures (e.g. the ``rope'' as the term is commonly
+used) necessitate either the loading of whole files into memory, or a custom
+implementation of a paging system.  The key idea of the Slicetable is to explicitly
+utilize the OS's paging facilities by manipulating large unmodified spans of text
+(viz. the freshly loaded file) through fat pointers in the manner of a piece-table whilst
+small chunks are mutated in-place and balanced as described earlier. In the following
+text we refer to these fat pointers as \emph{slices}. This also allows for an efficient
+implementation of bulk inserting strings larger than $C$ without splitting it into chunks
+and copying, which could be useful e.g. when inserting a large amount of output from a
+shell command.
+
+\begin{figure*}
+  \includegraphics[height=2cm]{slicetable.png}
+  \caption{Example of a slicetable after an edit}
+\end{figure*}
+
+In practice, we copy small portions of the original document as it fragments (less than
+some small constant $C$ similar to the $C$ for ropes) into \emph{small} slices which may
+be modified inplace, whilst slices larger than $C$ are fragmented during edits in the
+manner of a piece table . It should be observed that setting $C = 0$ is equivalent to a
+piece-table, and hence our structure constitutes a generalization of the piece-table.
+
+However it is greatly wasteful in our case to utilize the obvious invariant of ensuring
+all small slices of text exceed $H/2$, as scattered edits will incur an allocation and
+copy of $C/2$ bytes from the file mapping for each operation to ensure a minimum size. To
+avoid this, we introduce the concept of \emph{relaxed merging} (see listing 2), in
+contrast with the strict merging invariant of ropes Here we merge adjacent descriptors
+only if their combined content does not exceed $C$, maintaining an worst-case fill factor
+close to 1/2. TODO prove this below
+
+\begin{listing}
+\begin{minted}{c}
+merge_slices(spans[], data[], int fill)
+  i = 1
+  while(i < fill) {
+    if(spans[i-1] + spans[i] <= C) {
+      data[i-1] ++= data[i]
+      spans[i-1] += spans[i]
+      free(data[i])
+      spans[i,fill-1] = spans[i+1,fill]
+      data[i,fill-1] = data[i+1,fill]
+      fill -= 1
+    } else {
+      i += 1
+    }
+  }
+  return fill
+\end{minted}
+\caption{Block merging algorithm}
+\end{listing}
+
+\subsection{Height bound vs ropes}
+TODO
+
 \begin{itemize}
-
-\item stealing does *not* help here. We would much rather manipulate descriptors than
-  text
-
-\item unsafe COW allows for a transient API to be implemented by the type system of a
-  higher-level wrapper. Operations on the persistent version edit on a clone, whilst the
-  transient version only needs to clone once, and tracks this with a flag.
-
-\item setting small threshold = 0 is a piece table
-
-\item avoidance of additional branch at each level by utilizing fullness
 
 \item similar implementation complexity to ropes
 \item discuss mark maintenance briefly. Note that lazy maintenance is not sufficient in
@@ -220,7 +368,8 @@ The piece table (see fig \ref{fig:piecetable}).
   cause underflow - insertion into large may split off small, which must be merged using
   underflow handling - unclear what should occur when both adjacent slices are large.
   Splitting off is often unnecessary work - consider a disjoint set of small insertions
-  (separated by over f bytes). Then stealing copies f/2 bytes for each insertion
+  (separated by over f bytes). Then stealing copies f/2 bytes for each insertion.  Does
+  not reduce number of descriptors significantly
 
 \item relaxed merging algorithm - ensure no adjacent slices <= f for
   $$B\cdot\frac{f}{2} - f/2$$ fill factor. - adjacent small slices in the region are merged left where possible - if
@@ -233,88 +382,7 @@ The piece table (see fig \ref{fig:piecetable}).
   have already loaded it into cache. Implementing stealing then merely takes a single
   conditional.
 
-\item rather than implement error handling on the C side, which has rudimentary error
-  reporting capabilities, do it in the high-level language
-
 \end{itemize}
-
-
-
-
-
-
-\section{Slicetable}
-
-As we have seen, most chunking structures (e.g. the ``rope'' as the term is commonly
-used) necessitate either the loading of whole files into memory, or a custom
-implementation of a paging system.  The key idea of the Slicetable is to explicitly
-utilize the OS's paging facilities. This is achieved by manipulating large unmodified
-spans of text (viz. the freshly loaded file) by indirecting through descriptors in the
-manner of a piece table whilst small blocks may be modified in-place and rebalanced, as
-in a rope. The heterogeneous list of descriptors may then be stored in a suitable
-structure supporting an additive monoid such as a Btree.
-
-In the following text we refer to these descriptors as \emph{slices} to reflect possible
-indirection into a file mapping.
-
-\begin{figure*}
-  \includegraphics[height=2cm]{slicetable.png}
-  \caption{Example of a slicetable after an edit}
-\end{figure*}
-
-In practice, we copy small portions of the original document as it fragments (less than
-some small constant $H$ similar to the constant employed by ropes) into \emph{small}
-slices which may be modified inplace, whilst slices larger than $H$ are fragmented during
-edits according to [insert piece table listing]. It should be observed that setting
-$H = 0$ is equivalent to a piece table, and hence our structure constitutes a
-generalization of the piece table.
-
-However it is greatly wasteful in our case to utilize the obvious invariant of ensuring
-all small slices of text exceed $H/2$, as scattered edits will incur a copy and
-allocation of $H/2$ bytes from the file mapping for each modification.  To avoid this, we
-introduce the concept of \emph{relaxed merging}, in contrast with the strict merging
-invariant of ropes,
-
-(Ropes typically maintain the invariant that each text chunk must have a fill factor
-between some maximum $f/2$ and $f$ for some small constant $f$. The algorithm simply
-splits overfull leaves and redistributes the text of underfull leaves with
-neighbors. Underfull rebalancing is achieved by observing that any leaf $l$ satisfying
-the invariant and adjacent to the underfull leaf $u$ may either be merged with $l$ into a
-single leaf containing at least $f/2$ and less than $f$, or if their combined text
-exceeds $f$ we may need to copy up to $f/2$ bytes from $l$ into $u$. It is fairly easy to
-see that at most $f$ bytes are moved during each rebalancing operation.  TODO prove that
-bold claim and move this earlier)
-
-, which operates by the algorithm in listing 1. Here we merge adjacent descriptors only
-if their combined content does not exceed $H$, maintaining an worst-case fill factor
-close to 1/2, competitive with rope rebalancing as shown below.
-
-
-\begin{listing}
-\begin{minted}{c}
-merge_slices(spans[], data[], int fill)
-{
-  i = 1
-  while(i < fill) {
-    if(spans[i-1] + spans[i] <= H) {
-      data[i-1] ++= data[i]
-      spans[i-1] += spans[i]
-      free(data[i])
-      spans[i,fill-1] = spans[i+1,fill]
-      data[i,fill-1] = data[i+1,fill]
-      fill -= 1
-    } else {
-      i += 1
-    }
-  }
-  return fill;
-}
-\end{minted}
-\caption{Block merging algorithm}
-\end{listing}
-
-\subsection{Height bound vs ropes}
-TODO
 
 
 
@@ -343,23 +411,43 @@ which is certainly sufficient for basic display routines and cursor movements.
 
 \subsection{Language Integration}
 Our implementation requires low level communication with the OS, but editor development
-is likely more suited to a high level language with appropriate abstractions. TODO
+is likely more suited to a high level language with appropriate abstractions.
+
+Concurrency is implemented by a $clone$ primitive, which uses the standard path-copying
+method to create a snapshot of the text buffer. This primitive is unsafe, as the caller
+may neglect to call it prior to concurrent use, but allows for a transient API to be implemented by the type system of a high-level language. Edit operations on the persistent version always call $clone$, whilst the transient type only needs to clone once, and tracks its owning thread to ensure accesses do not occur from other threads.
+
+Rather than implement error handling on the C side, which has rudimentary error
+reporting capabilities, do it in the high-level language.
+
 
 
 \section{Evaluation}
 
+% table
+
 \subsection{Methodology}
+
+To test the performance of slicetables against other structures in the key areas listed in
+section 1, we tested the following:
+
+\begin{itemize}
+
+\item Load a 5.9mb XML file from disk
+\item Find up to 100000 occurences of 'thing' and replace them with 'thang'
+\item Find the 100000 occurences of 'thang' and replace them with 'thong', simulating a
+  mistake
+
+\end{itemize}
 
 % TODO contact cessen
 
-vis' linked list piece tables (fast file loading, slow search/replace). rb tree slicetable
-(tuned as piece table, slice table, talk about vscode, cache) red black tree is 25
-percent slower than Btree piece table searching/replacing '1000' - scan performance
+vis' linked list piece-tables (fast file loading, slow search/replace). rb tree slicetable
+(tuned as piece-table, slice table, talk about vscode, cache) red black tree is 25
+percent slower than Btree piece-table searching/replacing '1000' - scan performance
 matters
 
-
-We used Ropey as a primary competitor, as it was the most performant structure known to
-us, employing a balanced b+tree structure to track a list of fixed-size chunks.  It
+We used Ropey as a primary competitor, as it was the most performant structure known, employing a balanced b+tree structure to track a list of fixed-size chunks.  It
 was possible to remove line tracking, but not the codepoint tracking functionality which
 was built into the core of the structure (though the search implementation uses the Bytes
 iterator, which was found to increase performance by around 10\%). Therefore these
@@ -385,9 +473,6 @@ The generalization of a focus is interesting but adds significant complexity to
 implementation.\cite{errb} It remains unclear whether the performance advantages in
 certain cases is significant, and there remains the problem of maintaining multiple
 cursors, which cannot be represented as a single focus.
-
-https://blog.atom.io/2017/10/12/atoms-new-buffer-implementation.html
-https://code.visualstudio.com/blogs/2018/03/23/text-buffer-reimplementation
 
 \bibliographystyle{unsrt} \bibliography{slicetable}
 
