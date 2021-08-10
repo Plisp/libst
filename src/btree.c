@@ -38,7 +38,7 @@ struct block {
 	struct block *next; // for freeing later
 };
 
-#define NODESIZE (128 - sizeof(atomic_int)) // close enough
+#define NODESIZE (256 - sizeof(atomic_int)) // close enough
 #define PER_B (sizeof(size_t) + sizeof(void *))
 #define B ((int)(NODESIZE / PER_B))
 struct node {
@@ -291,13 +291,13 @@ struct block *slice_insert(void **target_ptr, size_t offset,
 	size_t oldspan = *tspan;
 	char *target = *target_ptr;
 #ifdef USETAGS
-	// if target is tagged as LARGE, untag and copy it
+	// if TARGET is tagged as LARGE, untag and copy it
 	if((uintptr_t)target >> 63) {
 		char *new = malloc(HIGH_WATER);
 		memcpy(new, (void *)((uintptr_t)target <<1 >>1), oldspan);
 		*target_ptr = target = new;
 	}
-	// untag data for copying
+	// untag DATA for copying
 	if((uintptr_t)data >> 63)
 		data = (char *)((uintptr_t)data <<1 >>1);
 #endif
@@ -315,7 +315,6 @@ struct block *slice_insert(void **target_ptr, size_t offset,
 		memmove(target + offset + len, &target[offset], oldspan - offset);
 		memcpy(target + offset, data, len);
 		new->type = HEAP;
-		// we have exclusive access here
 		atomic_store_explicit(&new->refc, 1, memory_order_relaxed);
 		return new;
 	}
