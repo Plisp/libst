@@ -1,5 +1,7 @@
 # An experimental text buffer structure
 
+Paper located in https://github.com/Plisp/libst/blob/master/latex/slicetable.pdf
+
 -   efficient range scans (sufficient for line iteration)
 -   efficient insert(i, string), delete(i, n)
 -   large file support (use virtual memory)
@@ -131,4 +133,4 @@ https://github.com/emacs-mirror/emacs/blob/master/src/insdel.c
 
 ## intellij (rope bonus round)
 
-<https://github.com/JetBrains/intellij-community/blob/master/platform/util/strings/src/com/intellij/util/text/ImmutableText.java>
+https://github.com/JetBrains/intellij-community/blob/762800312e91f48632d2d162735120a03beaecec/platform/util/base/src/com/intellij/util/text/ImmutableText.java

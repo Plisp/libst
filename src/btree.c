@@ -366,6 +366,7 @@ size_t rebalance_node(struct node * restrict i, struct node * restrict j,
 {
 	size_t delta = 0;
 	int count = (ifill + jfill <= B) ? jfill : (B/2 + (B&1) - ifill);
+
 	if(i_on_left) {
 		for(int c = 0; c < count; c++) {
 			i->spans[ifill+c] = j->spans[c];

@@ -63,7 +63,7 @@ text editor, supporting at least the operations
 
 \end{itemize}
 
-We define an \emph{edit} operation as being either an insert or a delete.
+We define an \emph{update} operation as being either an insert or a delete.
 
 Note that indexing in codepoints is unnecessary in an text buffer, as in the vast
 majority of cases code operates sequentially on grapheme clusters (e.g. deleting a
@@ -77,9 +77,9 @@ worthwhile in the context of a text editor.
 
 The simplest representation of a text buffer is to lay out a file's bytes in a contiguous
 array. However then, the time taken for insertions near the start of the buffer grows
-$O(n)$, where $n$ will be taken to mean the byte size of the file as all the text
-after the insertion point must be shifted to make room. Modern text editors typically
-employ one of three techniques:
+$\Theta(n)$, (where $n$ = no. bytes in the file) as all the text after the insertion
+point must be shifted to make room. Modern text editors typically employ one of three
+techniques:
 \begin{itemize}
 
 \item the gap buffer: use two arrays, with edits taking place at the end of the first
@@ -120,8 +120,8 @@ fetch is then restarted and proceeds normally.
   \includegraphics[width=\linewidth]{persistent.png}
   \caption{New represents the document returned after adding an exclamation mark, whose
     contents can be read via the 4 connected bottom boxes from left to right.
-    Directional arrows represent pointers.  Note how only $O(log n)$ nodes along the path
-    to the modified chunk need to be updated.}
+    Directional arrows represent pointers.  Note how only $\Theta(log\ n)$ nodes along the
+    path to the modified chunk need to be updated.}
   \label{fig:persistent}
 \end{figure}
 
@@ -139,7 +139,7 @@ inserted text via an array. However his argument that edit tracking may entail a
 memory overhead is annulled by the need to support undo, as well as the large secondary
 memory capacities available today.
 
-However we instead implemented a \emph{persistent} structure, where edit operations
+However we instead implemented a \emph{persistent} structure, where updates
 return a new copy of the data structure sharing structure with the original. The extra
 overhead of this design is reasonable considering that the operation log method is still
 required to maintain a similar quantity of information - for example a copy must be made
@@ -159,27 +159,26 @@ safety.\footnote{usually it does not make sense to support concurrent writes in 
 path copying so that old persistent versions are always safe for readers, though they may
 temporarily operate on an outdated copy.
 
-\subsection{Cursor maintenance}
+\subsection{Mark maintenance}
 
-A crucial consideration is the efficient maintenance of several \emph{cursors}
+A crucial consideration is the efficient maintenance of several \emph{marks}
 (representing the user's editing cursor(s), compiler diagnostics, the first character of
 views into the buffer, etc.), which must be updated to correspond to a new index when
-edit operations occur (e.g. typing on the line above a compiler error should move the
-error forward in the document). Essentially, cursors are attached to a segment of
+updates occur (e.g. typing on the line above a compiler error should move the
+error forward in the document). Essentially, marks are attached to a segment of
 \emph{text} rather than a fixed byte index.
 
-While it is possible to manage cursors within the structure itself, \footnote{See
+While it is possible to manage marks within the structure itself, \footnote{See
   github.com/Plisp/vico/blob/master/src/core/piece-table.lisp. Some appealing properties
   include O(1) local edits and finding the next/previous chunk} the result is an increase
-the implementation complexity of edit operations, mixing with 'hot' code updating the
+the implementation complexity of updates, mixing with 'hot' code maintaining the
 structure itself. This was observed to impact cache locality, but it remains open whether
 some alternative approach works efficiently.
 
 A more common approach is to employ a interval tree or similar structure which maintains
-the cursors separately from the text buffer. However this still suffers from poor
-locality.
+the marks separately from the text buffer. However this still suffers from poor locality.
 
-On the other hand, we observe that typically a small constant number of cursors is
+On the other hand, we observe that typically a small constant number of marks is
 necessary for maintaining views into the buffer and keep them in a simple array. A
 efficient mechanism for updating them during bulk replace operations is described later.
 It should be observed that typical multiple-cursor editing can be implemented by a macro
@@ -194,7 +193,7 @@ bulk, with the benefit of far better locality.
 \subsection{Chunking}
 
 Chunking structures such as ropes divide the file into smaller chunks, so less text may
-be moved during edit operations. Some editors use an array of lines, causing edits to
+be moved during updates. Some editors use an array of lines, causing edits to
 scale linearly in the length of lines. This method performs poorly with certain file
 types.  \footnote{e.g. minified javascript, script terminal dumps}
 
@@ -225,13 +224,13 @@ $0 \leq i \leq size(buf)$ - in particular for the size of the buffer, which caus
 loop to terminate on the last chunk as $i$ will equal the final chunk's size. A similar
 routine works if the chunk list is represented as a balanced BST, with an extra field at
 each node holding the cumulative size of its left subtree. This trick is well known and
-is used by Abiword\cite{abiword} and VSCode\cite{vscode}. The idea of storing
-cumulative sums can be viewed as analogous to the Fenwick tree\cite{fenwick}.
+is used by Abiword\cite{abiword} and VSCode\cite{vscode}. The idea of storing cumulative
+sums can be viewed as analogous to the Fenwick tree\cite{fenwick}.
 
-When inserting text, the size of a chunk may exceed $C$, requiring it
-to be split. If a chunk $l$ would overflow, the combined size of inserted text and the
-original content exceeds $C$. Thus we can split the combined text into two chunks
-containing at least $C/2$, satisfying the invariant.
+When inserting text, the size of a chunk may exceed $C$, requiring it to be split. If a
+chunk $l$ would overflow, the combined size of inserted text and the original content
+exceeds $C$. Thus we can split the combined text into two chunks containing at least
+$C/2$, satisfying the invariant.
 
 Also, deletions may cause a chunk to temporarily fall below $C/2$ bytes, becoming
 underfull. If a chunk $l$ satisfying the invariant is adjacent to the underfull leaf $u$,
@@ -241,8 +240,8 @@ below $C$ but more than $l$ initially had, which is at least $C/2$.
 
 It is easy to see that in both these cases at most $C$ bytes are moved during each
 rebalancing operation and invariants are restored. Assuming the chunks are stored in a
-log-balanced tree with minimum branching factor $A>1$, edit operations execute in
-$\Theta(log_{A}n)$ worst case.
+log-balanced tree with minimum branching factor $A>1$, updates execute in
+$\Theta(log_{A}n + C)$ worst case.
 
 786115235258909781
 
@@ -251,7 +250,7 @@ $\Theta(log_{A}n)$ worst case.
 \begin{figure}[H]
   \includegraphics[width=0.95\linewidth]{piecetable.png}
   \caption{The pointers into the files are annotated with the length of the segment they
-    refer to, similarly to how they would be represented in memory.}
+    refer to, similar to how they would be represented in memory.}
   \label{fig:piecetable}
 \end{figure}
 
@@ -274,14 +273,14 @@ reader.
 One downside of this approach is that accumulating a large number of edits, especially
 over a short period of time (perhaps during a global bulk search/replace) degrades
 performance significantly due to a proliferation of pieces in the list. The worst case is
-total fragmentation of the file into $n$ 1-byte pieces in the piece list, $C$ (~4000)
+total fragmentation of the file into $n$ 1-byte pieces in the piece list, $C$
 times more than a chunking structure. This behavior is especially apparent in editors
 such as Vis,\footnote{https://github.com/martanne/vis} which employ a linked list to
-represent the piece table, leading to catastrophic $O(n)$ reads.
+represent the piece-table, leading to catastrophic $O(n)$ reads.
 
 A common improvement on the classic linked-list is a red-black tree design, which is
 utilized by the Abiword word processor and (later heavily inspired) VSCode editor,
-achieving $O(log n)$ reads and edits in the worst case. However this is still greatly
+achieving $O(log\ n)$ reads and edits in the worst case. However this is still greatly
 suboptimal, as potentially orders of magnitudes more pieces must be maintained in a list
 than necessary.
 
@@ -309,7 +308,7 @@ shell command.
 In practice, we copy small portions of the original document as it fragments (less than
 some small constant $C$ similar to the $C$ for ropes) into \emph{small} slices which may
 be modified inplace, whilst slices larger than $C$ are fragmented during edits in the
-manner of a piece table . It should be observed that setting $C = 0$ is equivalent to a
+manner of a piece-table . It should be observed that setting $C = 0$ is equivalent to a
 piece-table, and hence our structure constitutes a generalization of the piece-table.
 
 However it is greatly wasteful in our case to utilize the obvious invariant of ensuring
@@ -387,27 +386,26 @@ TODO
 
 
 
-
 \section{Implementation}
 
 \subsection{Index structure}
 Our implementation is based on a b+-tree index structure, which improves cache
 performance by reducing block transfers.
 
-We make the decision not to track line offsets, although it should be noted that they can
+The decision was made not to track line offsets, although it should be noted that they can
 simply be tracked with an extra field at each node and in text chunks, similar to the
 technique used for indexing bytes. However it should be noted that this necessitates
 eventually reading in the whole file, defeating the purpose of utilizing virtual paging.
 \footnote{it may be possible to do this asynchronously, but this involves further
   complexity}.
 
-We concluded that in their typical use of assigning compiler diagnostics to locations in
+It was concluded that in their typical use of assigning compiler diagnostics to locations in
 a file, the bottleneck will typically be the compiler rather than the editor structure
 (this should happen asynchronously in any case). The use of line numbers for identifying
 locations in a file is simply satisfied by referring to features of the document instead,
 such as function definitions, sections, etc.  Therefore absolute line numbering is not
-optimized to $O(log n)$, but iterators allow traversal of newlines at multiple GB/s,
-which is certainly sufficient for basic display routines and cursor movements.
+optimized (to $O(log n)$), but iterators allow traversal of newlines at multiple GB/s,
+which is certainly sufficient for basic display routines and cursor movements in practice.
 
 \subsection{Language Integration}
 Our implementation requires low level communication with the OS, but editor development
@@ -415,10 +413,14 @@ is likely more suited to a high level language with appropriate abstractions.
 
 Concurrency is implemented by a $clone$ primitive, which uses the standard path-copying
 method to create a snapshot of the text buffer. This primitive is unsafe, as the caller
-may neglect to call it prior to concurrent use, but allows for a transient API to be implemented by the type system of a high-level language. Edit operations on the persistent version always call $clone$, whilst the transient type only needs to clone once, and tracks its owning thread to ensure accesses do not occur from other threads.
+may neglect to call it prior to concurrent use, but allows for a transient API to be
+implemented by the type system of a high-level language. Edit operations on the
+persistent version always call $clone$, whilst the transient type only needs to clone
+once, and tracks its owning thread to ensure accesses do not occur from other threads.
 
-Rather than implement error handling on the C side, which has rudimentary error
-reporting capabilities, do it in the high-level language.
+Rather than implement error handling on the C side, which has rudimentary error reporting
+capabilities, do it in the high-level language.
+
 
 
 
@@ -428,8 +430,8 @@ reporting capabilities, do it in the high-level language.
 
 \subsection{Methodology}
 
-To test the performance of slicetables against other structures in the key areas listed in
-section 1, we tested the following:
+To test the performance of slicetables against other structures in the key areas listed
+in section 1, the following benchmarks were conducted:
 
 \begin{itemize}
 
@@ -440,20 +442,60 @@ section 1, we tested the following:
 
 \end{itemize}
 
+These simulate a reasonable editing scenario in which the user wishes to revert a change
+after a batch operation, testing both range scans and edit performance.
+
+Ropey was used as a primary competitor, as it was the most performant structure known,
+employing a balanced b+tree structure to track a list of fixed-size chunks.  It was
+possible to remove line tracking, but not the codepoint tracking functionality which was
+built into the core of the structure (though the search implementation uses the Bytes
+iterator, which was found to increase performance by around 10\%). Therefore these
+benchmarks are not fully indicative of the performance gap between the structures,
+though the differences are revealing.
+
+In addition, two typical implementations of a piece-table using a linked list (derived
+from the vis editor) and a red-black tree were tested to demonstrate the improvements
+of the slicetable.
+
 % TODO contact cessen
 
-vis' linked list piece-tables (fast file loading, slow search/replace). rb tree slicetable
-(tuned as piece-table, slice table, talk about vscode, cache) red black tree is 25
-percent slower than Btree piece-table searching/replacing '1000' - scan performance
-matters
+\subsection{Results - TODO pretty graphs}
 
-We used Ropey as a primary competitor, as it was the most performant structure known, employing a balanced b+tree structure to track a list of fixed-size chunks.  It
-was possible to remove line tracking, but not the codepoint tracking functionality which
-was built into the core of the structure (though the search implementation uses the Bytes
-iterator, which was found to increase performance by around 10\%). Therefore these
-benchmarks are not fully indicative of the performance gap between the
-structures. However we still believe that the 2x increase in performance cannot be simply
-put down to locality.
+The results indicate that the B+tree slicetable and piece-tables perform the loading
+operation essentially instantaneously, whilst Ropey takes an acceptable, though
+noticeable 5ms.  However the memory scalability issues of rope structures become evident
+for large files, which must be read into memory prior to any accesses.
+
+The slicetable completed the bulk replace operation in half the time of ropey and 20
+percent faster than the red-black piece-table
+
+Notably, vis did not complete within 2 minutes, due to its O(n) edits, requiring the
+descriptor location to be determined anew via a linear scan from the beginning of the
+linked list after every edit.  $\Theta(1)$ Editing via an iterator 'focus' is not present
+within this implementation, though the author of this paper has implemented a working
+version in a separate project which exhibited poor cache locality during searches
+inherent to the piece-table's fragmentation.
+
+Following the first replace operation, it was found that the red black tree reached a
+catastrophic depth of 33 which led to significantly decreased scan performance in the
+secondary bulk replace. This reiterates the cache inefficiency of BSTs in practice, which
+should usually be replaced with alternatives in scenarios where the data does not need a
+stable location in memory.\footnote{Memory allocators are one example where red-black
+  trees work well}
+
+As previously stated, the slicetable implementation differs from Ropey in its interface
+due to the decision not to support codepoint indexing. However it seems likely that the
+2x increase in performance cannot be simply put down to locality. Due to the slicetable
+resembling a piece-table at file load time, significantly fewer operations are needed to
+perform early insertions, while the worst case tree depth matches Ropey to a constant
+(TODO add proof, investigate average case?).  It is expected that a future implementation
+including line indexing (as previously described) will make the inherent performance
+difference clear.
+
+Notes: vis' linked list piece-tables (fast file loading, slow search/replace). rb tree
+slicetable (tuned as piece-table, slice table, talk about vscode, cache) red black tree
+is 25 percent slower than Btree piece-table searching/replacing '1000' - scan performance
+matters
 
 
 
@@ -467,13 +509,15 @@ to pipeline stalls, while the CPU refreshes the instruction cache.
 
 Converting the underlying structure to a trie is an interesting future direction for
 research. Same cache accesses, improvement in branches during search? (this probably
-isn't really worth it on reconsideration, as scan performance and insertion are more important)
+isn't really worth it on reconsideration, as scan performance and insertion are more
+important)
 
 The generalization of a focus is interesting but adds significant complexity to
 implementation.\cite{errb} It remains unclear whether the performance advantages in
 certain cases is significant, and there remains the problem of maintaining multiple
 cursors, which cannot be represented as a single focus.
 
+\newpage
 \bibliographystyle{unsrt} \bibliography{slicetable}
 
 \end{document}
