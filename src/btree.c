@@ -1076,12 +1076,12 @@ char *st_iter_chunk(const SliceIter *it, size_t *len)
 	return it->data - it->off;
 }
 
-char st_iter_byte(const SliceIter *it)
+int st_iter_byte(const SliceIter *it)
 {
 	return iter_off_end(it) ? -1 : it->data[0];
 }
 
-char st_iter_next_byte(SliceIter *it, size_t count)
+int st_iter_next_byte(SliceIter *it, size_t count)
 {
 	if(iter_off_end(it))
 		return -1;
@@ -1098,7 +1098,7 @@ char st_iter_next_byte(SliceIter *it, size_t count)
 	return st_iter_next_byte(it, count - left);
 }
 
-char st_iter_prev_byte(SliceIter *it, size_t count)
+int st_iter_prev_byte(SliceIter *it, size_t count)
 {
 	if(it->pos == 0)
 		return -1;

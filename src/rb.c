@@ -445,7 +445,7 @@ static bool iter_off_end(const SliceIter *it) {
 	return it->offset == it->span;
 }
 
-char st_iter_byte(const SliceIter *it)
+int st_iter_byte(const SliceIter *it)
 {
 	if(iter_off_end(it))
 		return -1;
@@ -453,7 +453,7 @@ char st_iter_byte(const SliceIter *it)
 		return *it->data;
 }
 
-char st_iter_next_byte(SliceIter *it, size_t count)
+int st_iter_next_byte(SliceIter *it, size_t count)
 {
 	while(count--) {
 		if(iter_off_end(it))

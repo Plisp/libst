@@ -55,9 +55,9 @@ char *st_iter_chunk(const SliceIter *it, size_t *len);
 bool st_iter_next_chunk(SliceIter *it);
 bool st_iter_prev_chunk(SliceIter *it);
 
-char st_iter_byte(const SliceIter *it);
-char st_iter_next_byte(SliceIter *it, size_t count);
-char st_iter_prev_byte(SliceIter *it, size_t count);
+int st_iter_byte(const SliceIter *it);
+int st_iter_next_byte(SliceIter *it, size_t count);
+int st_iter_prev_byte(SliceIter *it, size_t count);
 
 long st_iter_cp(const SliceIter *it);
 long st_iter_next_cp(SliceIter *it, size_t count);

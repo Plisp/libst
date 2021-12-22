@@ -23,7 +23,7 @@ bool text_iterator_byte_get(const Iterator *it, char *b) {
 	return false;
 }
 
-char st_iter_byte(const SliceIter *it)
+int st_iter_byte(const SliceIter *it)
 {
 	char c;
 	text_iterator_byte_get(it, &c);
@@ -57,7 +57,7 @@ bool text_iterator_byte_next(Iterator *it, char *b) {
 	return true;
 }
 
-char st_iter_next_byte(Iterator *it, size_t count) {
+int st_iter_next_byte(Iterator *it, size_t count) {
 	char b;
 	bool res = true;
 	while(count-- && res) {
