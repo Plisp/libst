@@ -1130,7 +1130,7 @@ long st_iter_cp(const SliceIter *it)
 		return -1;
 	char lead = *it->data;
 	unsigned char len = utf8_len[lead >> 3];
-	if(len < it->span - it->off) // incomplete seq
+	if(len > it->span - it->off) // incomplete seq
 		return -1;
 	long cp = lead & utf8_lead_masks[len];
 	for(unsigned char i = 1; i < len; i++)
