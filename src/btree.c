@@ -1078,7 +1078,7 @@ char *st_iter_chunk(const SliceIter *it, size_t *len)
 
 int st_iter_byte(const SliceIter *it)
 {
-	return iter_off_end(it) ? -1 : it->data[0];
+	return iter_off_end(it) ? -1 : (unsigned char) it->data[0];
 }
 
 int st_iter_next_byte(SliceIter *it, size_t count)
@@ -1128,12 +1128,12 @@ long st_iter_cp(const SliceIter *it)
 	static const char utf8_lead_masks[] = { 0, 0xFF, 0x1F, 0x0F, 0x07 };
 	if(iter_off_end(it)) // otherwise we always have at least one byte
 		return -1;
-	char lead = *it->data;
+	unsigned char lead = *it->data;
 	unsigned char len = utf8_len[lead >> 3];
 	if(len > it->span - it->off) // incomplete seq
 		return -1;
 	long cp = lead & utf8_lead_masks[len];
-	for(unsigned char i = 1; i < len; i++)
+	for(int i = 1; i < len; i++)
 		cp = cp<<6 | (it->data[i] & 0x3F);
 	return cp <= 0x10FFFF ? cp : -1;
 }
@@ -1158,7 +1158,7 @@ long st_iter_next_cp(SliceIter *it, size_t count)
 	}
 	*/
 	while(count > 0) {
-		char byte = st_iter_next_byte(it, 1);
+		int byte = st_iter_next_byte(it, 1);
 		if(byte == -1) return -1;
 		if((byte & 0xC0) != 0x80) count--;
 	}
@@ -1168,7 +1168,7 @@ long st_iter_next_cp(SliceIter *it, size_t count)
 long st_iter_prev_cp(SliceIter *it, size_t count)
 {
 	while(count > 0) {
-		char byte = st_iter_prev_byte(it, 1);
+		int byte = st_iter_prev_byte(it, 1);
 		if(byte == -1) return -1;
 		if((byte & 0xC0) != 0x80) count--;
 	}
