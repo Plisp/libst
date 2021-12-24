@@ -43,6 +43,7 @@ size_t st_node_count(const SliceTable *st);
 // it is an error to call any of st_iter_* except st_iter_free after the
 // SliceTable instance has been freed or modified
 
+SliceIter *st_iter_init(SliceIter *it, SliceTable *st, size_t pos);
 SliceIter *st_iter_new(SliceTable *st, size_t pos);
 void st_iter_free(SliceIter *it);
 // reinitializes the iterator

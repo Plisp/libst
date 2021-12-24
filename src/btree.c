@@ -916,6 +916,10 @@ struct sliceiter {
 	SliceTable *st;
 };
 
+size_t st_iter_size(void) {
+	return sizeof(struct sliceiter);
+}
+
 SliceIter *st_iter_to(SliceIter *it, size_t pos)
 {
 	it->pos = pos;
@@ -962,11 +966,15 @@ SliceIter *st_iter_to(SliceIter *it, size_t pos)
 	return it;
 }
 
+SliceIter *st_iter_init(SliceIter *it, SliceTable *st, size_t pos) {
+	it->st = st;
+	return st_iter_to(it, pos);
+}
+
 SliceIter *st_iter_new(SliceTable *st, size_t pos)
 {
 	SliceIter *it = malloc(sizeof *it);
-	it->st = st;
-	return st_iter_to(it, pos);
+	return st_iter_init(it, st, pos);
 }
 
 int iter_stacksize(SliceIter *it)
