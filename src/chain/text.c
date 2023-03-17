@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,7 +121,7 @@ static void revision_free(Revision *rev);
 /* logical line counting cache */
 static void lineno_cache_invalidate(LineCache *cache);
 static size_t lines_skip_forward(Text *txt, size_t pos, size_t lines, size_t *lines_skiped);
-static size_t lines_count(Text *txt, size_t pos, size_t len);
+//static size_t lines_count(Text *txt, size_t pos, size_t len);
 
 /* stores the given data in a block, allocates a new one if necessary. Returns
  * a pointer to the storage location or NULL if allocation failed. */
@@ -990,5 +991,5 @@ size_t st_node_count(const Text *txt) {
 }
 
 SliceTable *st_clone(const SliceTable *st) {
-	return NULL;
+	assert(false);
 }

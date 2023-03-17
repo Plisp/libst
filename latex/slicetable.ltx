@@ -5,7 +5,6 @@
 \usepackage{wrapfig}
 \usepackage{minted}
 \usepackage{mdframed}
-\usepackage{amsmath}
 \usepackage[font=small,labelfont=bf]{caption}
 \usepackage[superscript]{cite}
 \usepackage[bookmarks]{hyperref}
@@ -224,8 +223,7 @@ $0 \leq i \leq size(buf)$ - in particular for the size of the buffer, which caus
 loop to terminate on the last chunk as $i$ will equal the final chunk's size. A similar
 routine works if the chunk list is represented as a balanced BST, with an extra field at
 each node holding the cumulative size of its left subtree. This trick is well known and
-is used by Abiword\cite{abiword} and VSCode\cite{vscode}. The idea of storing cumulative
-sums can be viewed as analogous to the Fenwick tree\cite{fenwick}.
+is used by Abiword\cite{abiword} and VSCode\cite{vscode}.
 
 When inserting text, the size of a chunk may exceed $C$, requiring it to be split. If a
 chunk $l$ would overflow, the combined size of inserted text and the original content
@@ -267,8 +265,7 @@ lots'' was just inserted. This is accomplished by splitting the first piece into
 (note no text is moved in the process, so this is $O(1)$) and inserting a new piece in
 the list between the two halves, pointing to the inserted text. As more text is added, it
 is appended to the append file and new pieces pointing to it can be inserted in the list.
-Deletions involve similar manipulations of pieces, and are left as an exercise to the
-reader.
+Deletions involve similar manipulations of pieces.
 
 One downside of this approach is that accumulating a large number of edits, especially
 over a short period of time (perhaps during a global bulk search/replace) degrades

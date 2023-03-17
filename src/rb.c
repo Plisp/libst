@@ -226,7 +226,7 @@ SliceTable *st_new_from_file(const char *path)
 
 SliceTable *st_clone(const SliceTable *st)
 {
-	return NULL;
+	assert(false);
 }
 
 static void tree_free(struct rb_node *node)

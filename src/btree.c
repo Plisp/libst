@@ -66,11 +66,14 @@ static void free_block(struct block *block)
 
 static void drop_block(struct block *block)
 {
-	if(atomic_fetch_sub_explicit(&block->refc,1,memory_order_release) == 1) {
-		atomic_thread_fence(memory_order_acquire);
-		if(block->next)
-			drop_block(block->next); // TODO this should be iterative
-		free_block(block);
+	while(block != NULL) {
+		if(atomic_fetch_sub_explicit(&block->refc,1,memory_order_release) == 1) {
+			atomic_thread_fence(memory_order_acquire);
+			struct block *next = block->next;
+			free_block(block);
+			block = next;
+		} else
+			return;
 	}
 }
 
@@ -226,10 +229,11 @@ SliceTable *st_new(void)
 SliceTable *st_new_from_file(const char *path)
 {
 	int fd = open(path, O_RDONLY);
-	if(!fd)
+	if(fd < 0)
 		return NULL;
-	size_t len = lseek(fd, 0, SEEK_END);
-	if(!len)
+
+	long len = lseek(fd, 0, SEEK_END);
+	if(len < 0)
 		return st_new(); // mmap cannot handle 0-length mappings
 
 	SliceTable *st = malloc(sizeof *st);
@@ -237,7 +241,7 @@ SliceTable *st_new_from_file(const char *path)
 	if(len <= HIGH_WATER) {
 		data = malloc(HIGH_WATER);
 		lseek(fd, 0, SEEK_SET);
-		if(read(fd, data, len) != (long)len) {
+		if(read(fd, data, len) != len) {
 			free(data);
 			free(st);
 			return NULL;
@@ -267,8 +271,7 @@ SliceTable *st_new_from_file(const char *path)
 void st_free(SliceTable *st)
 {
 	drop_node(st->root, st->levels);
-	if(st->blocks)
-		drop_block(st->blocks);
+	drop_block(st->blocks);
 	free(st);
 }
 
@@ -1086,7 +1089,7 @@ char *st_iter_chunk(const SliceIter *it, size_t *len)
 
 int st_iter_byte(const SliceIter *it)
 {
-	return iter_off_end(it) ? -1 : (unsigned char) it->data[0];
+	return iter_off_end(it) ? -1 : (unsigned char)it->data[0];
 }
 
 int st_iter_next_byte(SliceIter *it, size_t count)
@@ -1129,17 +1132,20 @@ int st_iter_prev_byte(SliceIter *it, size_t count)
 // which should not be allowed. We never redistribute leaves, only merge
 long st_iter_cp(const SliceIter *it)
 {
-	static const char utf8_len[] = {
+	static const int utf8_len[] = {
 		1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-		0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 3, 3, 4, 0
+		0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 3, 3, 4, 0 // high bit set
 	};
-	static const char utf8_lead_masks[] = { 0, 0xFF, 0x1F, 0x0F, 0x07 };
+	static const int utf8_lead_masks[] = { 0, 0xFF, 0x1F, 0x0F, 0x07 };
+
 	if(iter_off_end(it)) // otherwise we always have at least one byte
 		return -1;
 	unsigned char lead = *it->data;
-	unsigned char len = utf8_len[lead >> 3];
-	if(len > it->span - it->off) // incomplete seq
+
+	int len = utf8_len[lead >> 3];
+	if((unsigned)len > it->span - it->off) // incomplete seq
 		return -1;
+
 	long cp = lead & utf8_lead_masks[len];
 	for(int i = 1; i < len; i++)
 		cp = cp<<6 | (it->data[i] & 0x3F);
@@ -1352,7 +1358,7 @@ void st_pprint(const SliceTable *st)
 	enqueue((struct q){ st->levels, st->root });
 	struct q *next;
 	int lastlevel = 1;
-	while((next = dequeue())) {
+	while((next = dequeue()) != NULL) {
 		if(lastlevel != next->level)
 			puts("");
 		print_node(next->node, next->level);
@@ -1368,7 +1374,7 @@ void st_dump(const SliceTable *st, FILE *file)
 {
 	enqueue((struct q){ st->levels, st->root });
 	struct q *next;
-	while((next = dequeue()))
+	while((next = dequeue()) != NULL)
 		if(next->level > 1)
 			for(int i = 0; i < node_fill(next->node, 0); i++)
 				enqueue((struct q){ next->level-1, next->node->child[i] });
